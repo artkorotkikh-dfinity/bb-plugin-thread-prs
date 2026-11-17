@@ -394,13 +394,19 @@ export default async function plugin(bb: BbPluginApi) {
     const items: ThreadPr[] = collected.refs.map((ref) => {
       const entry = cache.get(cacheKey(ref.hostId, ref.url));
       const status = newer(ref.builtin, entry?.status ?? null);
+      // The list needs the unresolved count. Comment contents stay in the Auto-fix cache.
+      let visibleStatus: ThreadPr["status"] = null;
+      if (status !== null) {
+        const { reviewThreads: _reviewThreads, ...summary } = status;
+        visibleStatus = summary;
+      }
       return {
         key: ref.key,
         repo: ref.repo,
         number: ref.number,
         url: ref.url,
         sources: ref.sources,
-        status,
+        status: visibleStatus,
         error: entry?.error ?? null,
         statusSource: status === null ? null : status === entry?.status ? "gh" : "github-pr-status",
         fetchedAt: entry?.fetchedAt ?? null,

@@ -16,7 +16,16 @@ const pr = (changes = {}) => ({
 });
 const readPr = (changes) => ({contains:["graphql"],json:{data:{resource:pr(changes)}}});
 const response = (code, body) => `HTTP/2.0 ${code}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(body)}`;
-const workflow = (changes = {}) => ({id:17,workflow_id:9,run_number:1,run_attempt:1,head_sha:HEAD,head_branch:"feature",event:"pull_request",status:"completed",conclusion:"failure",created_at:new Date().toISOString(),repository:{full_name:"o/r"},...changes});
+const runPr = (number = 1, base = "main") => ({
+  number,
+  base: { ref: base, repo: { id: 100 } },
+  head: { ref: "feature", sha: HEAD, repo: { id: 100 } },
+});
+const workflow = (changes = {}) => ({
+  id:17, workflow_id:9, run_number:1, run_attempt:1, head_sha:HEAD, head_branch:"feature",
+  event:"pull_request", status:"completed", conclusion:"failure", created_at:new Date().toISOString(),
+  repository:{id:100, full_name:"o/r"}, head_repository:{id:100}, pull_requests:[runPr()], ...changes,
+});
 const listRuns = (runs) => ({contains:[`repos/o/r/actions/runs?head_sha=${HEAD}`],json:{total_count:runs.length,workflow_runs:runs}});
 
 // Every gh process is a private fixture. No request can escape to GitHub.
@@ -104,7 +113,17 @@ test("Copilot review refuses completed and invalid PR targets",async(t)=>{
 
 test("CI retry selects only current-head, latest failed Actions runs",async(t)=>{
   const selected=workflow();
-  const runs=[selected,workflow({id:18,workflow_id:10}),workflow({id:19,workflow_id:10,run_number:2,conclusion:"success"}),workflow({id:20,workflow_id:11,head_sha:"c".repeat(40)}),workflow({id:21,workflow_id:12,repository:{full_name:"other/repo"}})];
+  const runs = [
+    selected,
+    workflow({id:18, workflow_id:10}),
+    workflow({id:19, workflow_id:10, run_number:2, conclusion:"success"}),
+    workflow({id:20, workflow_id:11, head_sha:"c".repeat(40)}),
+    workflow({id:21, workflow_id:12, repository:{id:101, full_name:"other/repo"}}),
+    workflow({id:22, run_number:3, pull_requests:[runPr(2, "release")]}),
+    workflow({id:23, workflow_id:13, event:"workflow_dispatch"}),
+    workflow({id:24, workflow_id:14, pull_requests:[]}),
+    workflow({id:25, workflow_id:15, pull_requests:[runPr(), runPr(2, "release")]}),
+  ];
   const env=await setup(t,[readPr(),listRuns(runs),{contains:["GET","repos/o/r/actions/runs/17"],json:selected},readPr(),{contains:["POST","repos/o/r/actions/runs/17/rerun-failed-jobs"],stdout:response(201,{})}]);
   const result=await env.call("rerunFailedCi",{url:URL,expectedHead:HEAD});
   assert.equal(result.ok,true,result.message);
@@ -118,7 +137,20 @@ test("CI retry does not write when the PR head changes",async(t)=>{
   assert.equal((await env.calls()).filter(c=>c.includes("POST")).length,0);
 });
 
-for(const changed of [{status:"in_progress",conclusion:null},{run_attempt:50},{created_at:"2020-01-01T00:00:00Z"}])test(`CI retry skips an unsupported or changed run: ${JSON.stringify(changed)}`,async(t)=>{
+test("CI retry skips a run if the PR target changes before submission", async (t) => {
+  const run = workflow();
+  const env = await setup(t, [
+    readPr(), listRuns([run]),
+    {contains:["GET", "repos/o/r/actions/runs/17"], json:run},
+    readPr({baseRefName:"release"}),
+  ]);
+  const result = await env.call("rerunFailedCi", {url:URL, expectedHead:HEAD});
+  assert.equal(result.ok, false);
+  assert.match(result.message, /no longer matches this PR/);
+  assert.equal((await env.calls()).some(call => call.includes("POST")), false);
+});
+
+for(const changed of [{status:"in_progress",conclusion:null},{run_attempt:50},{created_at:"2020-01-01T00:00:00Z"},{pull_requests:[runPr(2,"release")]}])test(`CI retry skips an unsupported or changed run: ${JSON.stringify(changed)}`,async(t)=>{
   const env=await setup(t,[readPr(),listRuns([workflow()]),{contains:["GET","repos/o/r/actions/runs/17"],json:workflow(changed)}]);
   assert.equal((await env.call("rerunFailedCi",{url:URL,expectedHead:HEAD})).ok,false);
   assert.equal((await env.calls()).filter(c=>c.includes("POST")).length,0);

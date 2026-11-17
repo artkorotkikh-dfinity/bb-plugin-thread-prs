@@ -65,7 +65,9 @@ child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
 Rows, the single-PR summary and context cards show **N unresolved** when there are
 unresolved review conversations. This counts one per review thread, including
 outdated conversations that are still unresolved; replies do not increase the count.
-General PR conversation comments have no resolved state and are excluded. Zero and
+The status list and CLI JSON include the count. Auto-fix keeps inline comment
+details in its internal cache. General PR conversation comments have no resolved
+state and are excluded. Zero and
 unknown counts stay hidden to keep rows compact. Counts follow the existing status
 refresh schedule. After the first 50 threads, up to ten lightweight pages are read
 for the count; a failed or incomplete read leaves it unknown rather than showing
@@ -83,11 +85,12 @@ GitHub permissions. Auto-fix remains visible beside the menu.
 
 - **View diff** opens the PR's changed files, following the link-opening setting.
   This action remains available on completed PRs.
-- **Re-run failed CI** retries failed jobs in the latest failed GitHub Actions run
-  for each workflow/event on the displayed head commit. It checks the PR head and
-  each run again before submitting. Successful workflows and checks from external
-  CI providers are not rerun. GitHub's rerun age/attempt limits apply; this can use
-  runner minutes. At most 10 failed workflows are submitted per click.
+- **Re-run failed CI** retries failed jobs on the displayed commit when GitHub
+  Actions identifies the selected PR as the sole PR for the run. The plugin
+  checks the current head, target branch and run again before submitting. Use
+  GitHub Actions for runs without a verified PR association. GitHub's age and
+  attempt limits apply. Retries can use runner minutes, with up to 10 workflows
+  submitted per click.
 - **Copilot review** requests a new review through GitHub's Copilot code-review API,
   preserving human reviewers. It requires Copilot eligibility, quota and pull-request
   write permission; an existing pending request is reported without another retry.

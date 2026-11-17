@@ -109,7 +109,7 @@ export const threadPrSchema = z.object({
   number: z.number().int().positive(),
   url: z.string(),
   sources: z.array(prSourceSchema),
-  status: prStatusSchema.nullable(),
+  status: prStatusSchema.omit({ reviewThreads: true }).nullable(),
   /** Set when GitHub could not be read for this PR; `status` may still hold the last good read. */
   error: z.string().nullable(),
   /** Where `status` came from: our own gh read, or bb's GitHub PR Status plugin. */

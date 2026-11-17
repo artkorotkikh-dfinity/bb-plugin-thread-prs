@@ -503,6 +503,25 @@ const reviewThread = (change = {}) => ({
 const commentedStatus = (change = {}) => ({
   ...status(10, "open"), authorLogin: "pr-author", reviewThreads: [reviewThread()], ...change,
 });
+test("status RPC and CLI preserve the unresolved count without returning review contents", async (t) => {
+  const fullStatus = commentedStatus({ unresolvedReviewThreadCount: 3 });
+  const env = setup({ readPr: (prUrl) => ({
+    ok: true,
+    pr: prUrl === url(10) ? fullStatus : status(Number(prUrl.split("/").at(-1)), "open"),
+  }) });
+  t.after(() => env.harness.lifecycle.dispose());
+  await plugin(env.bb);
+
+  const cli = await list(env.harness);
+  const rpc = await env.harness.behavior.callRpc("threadPullRequests", { threadId: "R" });
+  for (const result of [cli, rpc]) {
+    const item = result.items.find((entry) => entry.number === 10);
+    assert.equal(item.status.unresolvedReviewThreadCount, 3);
+    assert.equal(Object.hasOwn(item.status, "reviewThreads"), false);
+    assert.doesNotMatch(JSON.stringify(item), /Check this wording|discussion_r1/);
+  }
+});
+
 const conflictStatus = (change = {}) => ({
   ...status(10, "open"), mergeable: "CONFLICTING", mergeStateStatus: "DIRTY",
   baseRefName: "main", baseRefOid: "base-1", ...change,

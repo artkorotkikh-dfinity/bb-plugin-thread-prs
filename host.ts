@@ -363,13 +363,36 @@ function mergePreview(pr: ActionPr): MergePreview {
 }
 
 const runIdSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const runRepoSchema = z.object({ id: runIdSchema });
 const workflowRunSchema = z.object({
   id: runIdSchema, workflow_id: runIdSchema, run_number: runIdSchema, run_attempt: runIdSchema,
   head_sha: commitOidSchema, head_branch: z.string().nullable(), event: z.string(),
   status: z.string(), conclusion: z.string().nullable(), created_at: z.string(),
-  repository: z.object({ full_name: z.string() }),
+  repository: runRepoSchema.extend({ full_name: z.string() }),
+  head_repository: runRepoSchema.nullish(),
+  pull_requests: z.array(z.object({
+    number: runIdSchema,
+    base: z.object({ ref: z.string(), repo: runRepoSchema.nullish() }),
+    head: z.object({ ref: z.string(), sha: commitOidSchema, repo: runRepoSchema.nullish() }),
+  })).nullish(),
 });
 type WorkflowRun = z.infer<typeof workflowRunSchema>;
+
+function matchesPrRun(run: WorkflowRun, pr: ActionPr): boolean {
+  if (run.event !== "pull_request" && run.event !== "pull_request_target") return false;
+  if (run.head_sha !== pr.headRefOid || run.head_branch !== pr.headRefName ||
+      run.repository.full_name.toLowerCase() !== pr.repository.nameWithOwner.toLowerCase()) return false;
+
+  // A workflow on the same head can belong to another PR targeting a different base.
+  const associated = run.pull_requests;
+  if (associated?.length !== 1 || !run.head_repository) return false;
+  const [target] = associated;
+  return target.number === pr.number &&
+    target.base.ref === pr.baseRefName && target.base.repo?.id === run.repository.id &&
+    target.head.ref === pr.headRefName && target.head.sha === pr.headRefOid &&
+    target.head.repo?.id === run.head_repository.id;
+}
+
 const failedRun = (run: WorkflowRun) => run.status === "completed" && ["failure", "timed_out"].includes(run.conclusion ?? "");
 
 async function failedRuns(repo: string, pr: ActionPr, signal: AbortSignal): Promise<WorkflowRun[]> {
@@ -386,7 +409,7 @@ async function failedRuns(repo: string, pr: ActionPr, signal: AbortSignal): Prom
   if (runs.length < total) throw new Error("Too many workflow runs to inspect completely. Use GitHub Actions for this PR.");
   const latest = new Map<string, WorkflowRun>();
   for (const run of runs) {
-    if (run.head_sha !== pr.headRefOid || run.head_branch !== pr.headRefName || run.repository.full_name.toLowerCase() !== repo.toLowerCase()) continue;
+    if (!matchesPrRun(run, pr)) continue;
     const key = `${run.workflow_id}:${run.event}`;
     const previous = latest.get(key);
     if (!previous || run.run_number > previous.run_number || (run.run_number === previous.run_number && run.id > previous.id)) latest.set(key, run);
@@ -401,7 +424,7 @@ async function rerunFailedCi(url: string, expectedHead: string, signal: AbortSig
   requireOpen(pr, expectedHead);
   const repo = pr.repository.nameWithOwner;
   const runs = await failedRuns(repo, pr, signal);
-  if (!runs.length) return { ok: false, message: "No failed GitHub Actions runs on this PR's current commit." };
+  if (!runs.length) return { ok: false, message: "No failed GitHub Actions runs could be verified for this PR's current commit. Check GitHub Actions for other runs." };
   let sent = 0;
   const failures: string[] = [];
   for (const run of runs) {
@@ -411,14 +434,18 @@ async function rerunFailedCi(url: string, expectedHead: string, signal: AbortSig
       const current = workflowRunSchema.safeParse(JSON.parse(read.stdout));
       if (!current.success) throw new Error("GitHub returned incomplete workflow run details. Refresh and try again.");
       const latest = current.data;
-      if (latest.id !== run.id || latest.head_sha !== expectedHead || latest.head_branch !== pr.headRefName || latest.repository.full_name.toLowerCase() !== repo.toLowerCase() || !failedRun(latest)) {
+      if (latest.id !== run.id || !matchesPrRun(latest, pr) || !failedRun(latest)) {
         failures.push(`Run ${run.id} changed; skipped`); continue;
       }
       const created = Date.parse(latest.created_at);
       if (!Number.isFinite(created) || Date.now() - created > 30 * 24 * 60 * 60 * 1000 || latest.run_attempt >= 50) {
         failures.push(`Run ${run.id} is outside GitHub's rerun limits`); continue;
       }
-      requireOpen(await readActionPr(url, signal), expectedHead);
+      const currentPr = await readActionPr(url, signal);
+      requireOpen(currentPr, expectedHead);
+      if (!matchesPrRun(latest, currentPr)) {
+        failures.push(`Run ${run.id} no longer matches this PR; skipped`); continue;
+      }
       const out = await api("POST", `repos/${repo}/actions/runs/${run.id}/rerun-failed-jobs`, signal);
       if (out.code !== 0) failures.push(`Run ${run.id}: ${firstLine(out.stderr)}`);
       else sent++;
