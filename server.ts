@@ -12,6 +12,7 @@ import {
   autoFixLabel,
   autoFixSchema,
   hostContract,
+  parsePrUrl,
   prStateSchema,
   reviewStateSchema,
   rpcContract,
@@ -41,18 +42,8 @@ const TTL_OPEN_MS = 2 * 60 * SECOND;
 const TTL_DONE_MS = 15 * 60 * SECOND;
 const TTL_ERROR_MS = 60 * SECOND;
 
-const GITHUB_PR_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:[/?#].*)?$/;
-
-function parsePrUrl(url: string): { repo: string; number: number; url: string } | null {
-  const match = GITHUB_PR_URL.exec(url);
-  if (match === null) return null;
-  const [, owner, name, num] = match;
-  const repo = `${owner}/${name}`;
-  const number = Number(num);
-  return { repo, number, url: `https://github.com/${repo}/pull/${number}` };
-}
-
 const prKey = (repo: string, number: number) => `${repo.toLowerCase()}#${number}`;
+const cacheKey = (hostId: string | null, url: string) => JSON.stringify([hostId, url]);
 
 // Only the part of Focus Board's link record we read; anything else is ignored.
 const focusLinkSchema = z.object({
@@ -120,6 +111,7 @@ type Ref = {
   sources: PrSource[];
   builtin: PrStatus | null;
   environmentId: string | null;
+  hostId: string | null;
 };
 
 type Collected = {
@@ -186,7 +178,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   const host = bb.hosts.experimental_client({ contract: hostContract });
   const cache = new Map<string, CacheEntry>();
-  const hostByEnvironment = new Map<string, string | null>();
+  const lifecycle = new AbortController();
+  bb.onDispose(() => lifecycle.abort());
   const lastSignature = new Map<string, string>();
   const inflight = new Map<string, Promise<void>>();
   const hostReads = new Map<string | null, Promise<unknown>>();
@@ -195,7 +188,7 @@ export default async function plugin(bb: BbPluginApi) {
     const parsed = savedAutoFixSchema.safeParse(await bb.storage.kv.get(key));
     const pr = parsed.success ? parsePrUrl(parsed.data.url) : null;
     if (parsed.success && pr && key === `${AUTO_FIX_PREFIX}${prKey(pr.repo, pr.number)}`) {
-      autoFix.set(prKey(pr.repo, pr.number), parsed.data);
+      autoFix.set(prKey(pr.repo, pr.number), { ...parsed.data, url: pr.url });
     }
   }
   let autoFixWork: Promise<unknown> = Promise.resolve();
@@ -228,11 +221,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function hostIdFor(environmentId: string, signal?: AbortSignal): Promise<string | null> {
-    if (hostByEnvironment.has(environmentId)) return hostByEnvironment.get(environmentId) ?? null;
     const environment = await bb.sdk.environments.get({ environmentId, signal }).catch(() => null);
-    const hostId = environment?.hostId ?? null;
-    hostByEnvironment.set(environmentId, hostId);
-    return hostId;
+    return environment?.hostId ?? null;
   }
 
   async function collect(threadId: string, signal?: AbortSignal): Promise<Collected> {
@@ -277,7 +267,7 @@ export default async function plugin(bb: BbPluginApi) {
           truncationReason = "pullRequests";
           return;
         }
-        ref = { key, ...parsed, sources: [], builtin: null, environmentId: null };
+        ref = { key, ...parsed, sources: [], builtin: null, environmentId: null, hostId: null };
         refs.set(key, ref);
       }
       if (!ref.sources.some((s) => s.kind === source.kind && s.threadId === source.threadId)) {
@@ -345,13 +335,21 @@ export default async function plugin(bb: BbPluginApi) {
       if (hostId !== null) break;
       hostId = await hostIdFor(environmentId, signal);
     }
-
+    const hosts = new Map<string, Promise<string | null>>();
+    for (const ref of refs.values()) {
+      // Branch ownership wins over links; otherwise use the first linking thread's machine.
+      const environmentId = threads.get(ownerOf(ref).threadId)?.environmentId;
+      if (environmentId) {
+        if (!hosts.has(environmentId)) hosts.set(environmentId, hostIdFor(environmentId, signal));
+        ref.hostId = await hosts.get(environmentId)!;
+      } else ref.hostId = hostId;
+    }
     return { refs: [...refs.values()], ownBranchKey, hostId, truncationReason };
   }
 
   function assemble(threadId: string, collected: Collected): ThreadPrs {
     const items: ThreadPr[] = collected.refs.map((ref) => {
-      const entry = cache.get(ref.url);
+      const entry = cache.get(cacheKey(ref.hostId, ref.url));
       const status = newer(ref.builtin, entry?.status ?? null);
       return {
         key: ref.key,
@@ -393,7 +391,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (signal?.aborted) return false;
       const now = Date.now();
       const stale = urls.filter((url) => {
-          const entry = cache.get(url);
+          const entry = cache.get(cacheKey(hostId, url));
           return entry === undefined || now - entry.fetchedAt >= ttlFor(entry);
       });
       let changed = false;
@@ -404,11 +402,24 @@ export default async function plugin(bb: BbPluginApi) {
           failure = "No machine to run gh on: the thread has no environment.";
         } else {
           try {
-            ({ results } = await host.call(
-              "fetchPullRequests",
-              { urls: stale },
-              { hostId, signal, timeoutMs: 30 * SECOND },
-            ));
+            for (let offset = 0; offset < stale.length; offset += MAX_PRS) {
+              for (let attempt = 0; ; attempt++) {
+                (signal ?? lifecycle.signal).throwIfAborted();
+                try {
+                  const batch = await host.call(
+                    "fetchPullRequests", { urls: stale.slice(offset, offset + MAX_PRS) },
+                    { hostId, signal, timeoutMs: 30 * SECOND },
+                  );
+                  Object.assign(results, batch.results);
+                  break;
+                } catch (error) {
+                  // Existing UI watchers can run during candidate activation on reload.
+                  // Retry only this local readiness error, for at most five seconds.
+                  if (attempt >= 19 || !errorText(error).startsWith("host plugin calls are unavailable during factory registration")) throw error;
+                  await sleep(250, signal ?? lifecycle.signal);
+                }
+              }
+            }
           } catch (error) {
             if (signal?.aborted) return false;
             failure = errorText(error);
@@ -417,7 +428,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         for (const url of stale) {
           const read = results[url];
-          const previous = cache.get(url);
+          const previous = cache.get(cacheKey(hostId, url));
           const next: CacheEntry =
             read?.ok === true
               ? { status: read.pr, error: null, fetchedAt: Date.now() }
@@ -426,7 +437,7 @@ export default async function plugin(bb: BbPluginApi) {
                   error: failure ?? (read?.ok === false ? read.message : "No answer from gh."),
                   fetchedAt: Date.now(),
                 };
-          if (store(url, next)) changed = true;
+          if (store(cacheKey(hostId, url), next)) changed = true;
         }
       }
       if (changed) bb.rpc.experimental_invalidate([THREAD_PRS_TAG]);
@@ -442,8 +453,15 @@ export default async function plugin(bb: BbPluginApi) {
     const running = inflight.get(threadId);
     if (running !== undefined) return running;
     const work = (async () => {
+      signal = signal ? AbortSignal.any([signal, lifecycle.signal]) : lifecycle.signal;
       const collected = await collect(threadId, signal);
-      await refreshUrls(collected.hostId, collected.refs.map((ref) => ref.url), signal);
+      const groups = new Map<string | null, string[]>();
+      for (const ref of collected.refs) {
+        const urls = groups.get(ref.hostId) ?? [];
+        urls.push(ref.url);
+        groups.set(ref.hostId, urls);
+      }
+      await Promise.all([...groups].map(([hostId, urls]) => refreshUrls(hostId, urls, signal)));
       let changed = false;
       const signature = JSON.stringify([
         collected.refs.map((ref) => [ref.key, ref.sources, ref.builtin]),
@@ -463,6 +481,13 @@ export default async function plugin(bb: BbPluginApi) {
   function setAutoFix(threadId: string, url: string, enabled: boolean) {
     return serializeAutoFix(async () => {
       const parsed = parsePrUrl(url);
+      const key = parsed ? prKey(parsed.repo, parsed.number) : null;
+      const saved = key ? autoFix.get(key) : undefined;
+      // A removed link must never make an existing subscription impossible to stop.
+      if (!enabled && key && saved) {
+        await saveAutoFix(key, { ...saved, enabled: false, stoppedReason: null });
+        return { ok: true, message: "Auto-fix off." };
+      }
       const collected = await collect(threadId);
       const ref = parsed === null ? undefined : collected.refs.find((candidate) => candidate.key === prKey(parsed.repo, parsed.number));
       if (!ref) return { ok: false, message: "That pull request is not listed for this thread." };
@@ -470,8 +495,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (enabled && previous?.enabled) return { ok: true, message: "Auto-fix is already on." };
       const owner = ownerOf(ref);
       if (enabled) {
-        await refreshUrls(collected.hostId, [ref.url]);
-        const status = newer(ref.builtin, cache.get(ref.url)?.status ?? null);
+        await refreshUrls(ref.hostId, [ref.url], lifecycle.signal);
+        const status = newer(ref.builtin, cache.get(cacheKey(ref.hostId, ref.url))?.status ?? null);
         if (status?.state !== "open" && status?.state !== "draft") {
           return { ok: false, message: "Auto-fix requires an open or draft pull request." };
         }
@@ -484,7 +509,7 @@ export default async function plugin(bb: BbPluginApi) {
       await saveAutoFix(ref.key, enabled ? {
         enabled: true, ownerThreadId: owner.threadId, attempts: 0,
         lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
-        url: ref.url, hostId: hostId ?? collected.hostId,
+        url: ref.url, hostId: hostId ?? ref.hostId,
       } : {
         ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, url: ref.url, hostId: null }),
         enabled: false, stoppedReason: null,
@@ -495,12 +520,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function pollAutoFix(signal: AbortSignal): Promise<void> {
     const groups = new Map<string, SavedAutoFix[]>();
+    const readHosts = new Map<string, string>();
     for (const state of autoFix.values()) {
       if (!state.enabled) continue;
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
       if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) continue;
-      const hostId = (thread.environmentId ? await hostIdFor(thread.environmentId, signal) : null) ?? state.hostId;
+      const collected = await collect(state.ownerThreadId, signal);
+      const ref = collected.refs.find((ref) => ref.url === state.url && ref.sources.some((source) => source.threadId === state.ownerThreadId));
+      if (!ref) continue;
+      const hostId = thread.environmentId ? await hostIdFor(thread.environmentId, signal) : state.hostId;
       if (hostId === null) continue;
+      readHosts.set(state.url, hostId);
       const group = groups.get(hostId) ?? [];
       group.push(state);
       groups.set(hostId, group);
@@ -516,7 +546,9 @@ export default async function plugin(bb: BbPluginApi) {
         await saveAutoFix(key, { ...state, enabled: false, stoppedReason: "Stopped after 3 tries" });
         continue;
       }
-      const entry = cache.get(state.url);
+      const hostId = readHosts.get(state.url);
+      if (!hostId) continue;
+      const entry = cache.get(cacheKey(hostId, state.url));
       const pr = entry?.status;
       if (!entry || entry.error || Date.now() - entry.fetchedAt >= ttlFor(entry) || !pr ||
           (pr.state !== "open" && pr.state !== "draft") || pr.checks.pending > 0 ||
@@ -562,6 +594,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.background.service("auto-fix", {
     async start(signal) {
+      // Services may start before the candidate plugin's host entry can be called.
+      await sleep(TICK_MS, signal);
       while (!signal.aborted) {
         await serializeAutoFix(() => pollAutoFix(signal)).catch((error: unknown) => {
           if (!signal.aborted) bb.log.warn(`Auto-fix poll failed: ${errorText(error)}`);
@@ -579,12 +613,12 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: false, message: "That pull request is not listed for this thread." };
     }
     if (item.status?.state !== "draft") return { ok: false, message: `#${item.number} is not a draft.` };
-    if (collected.hostId === null) return { ok: false, message: "No machine to run gh on." };
+    if (ref.hostId === null) return { ok: false, message: "No machine to run gh on." };
     const result = await host
-      .call("markReady", { url }, { hostId: collected.hostId, timeoutMs: 30 * SECOND })
+      .call("markReady", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
       .catch((error: unknown) => ({ ok: false, message: errorText(error) }));
     if (!result.ok) return result;
-    cache.delete(url);
+    cache.delete(cacheKey(ref.hostId, url));
     // bb's own PR segment shows the same PR when it is an environment's branch PR: let it catch up too.
     if (ref.environmentId !== null) {
       await bb.sdk.plugins
@@ -607,7 +641,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadPullRequests: async ({ threadId }, context) => {
         const collected = await collect(threadId, context.experimental_signal);
         // PRs never read yet start a refresh; the watcher below normally gets there first.
-        if (collected.refs.some((ref) => !cache.has(ref.url))) {
+        if (collected.refs.some((ref) => !cache.has(cacheKey(ref.hostId, ref.url)))) {
           void refresh(threadId).catch(() => undefined);
         }
         return assemble(threadId, collected);
@@ -684,6 +718,7 @@ export default async function plugin(bb: BbPluginApi) {
         case "-h":
           return { exitCode: 0, stdout: usage };
         case "list": {
+          if (args.length > 1) return { exitCode: 1, stderr: usage };
           const threadId = args[0] ?? ctx.threadId;
           if (!threadId) return { exitCode: 1, stderr: `No thread id.\n${usage}` };
           await refresh(threadId, ctx.signal);
@@ -711,7 +746,7 @@ export default async function plugin(bb: BbPluginApi) {
         case "ready": {
           const parsed = args[0] ? parsePrUrl(args[0]) : null;
           const threadId = args[1] ?? ctx.threadId;
-          if (parsed === null || !threadId) return { exitCode: 1, stderr: usage };
+          if (parsed === null || !threadId || args.length > 2) return { exitCode: 1, stderr: usage };
           const result = await markReady(threadId, parsed.url);
           return result.ok
             ? { exitCode: 0, stdout: result.message }

@@ -38,6 +38,16 @@ export const prStatusSchema = z.object({
 });
 export type PrStatus = z.infer<typeof prStatusSchema>;
 
+/** Only github.com PRs are supported; canonical casing also stabilizes cache keys. */
+export function parsePrUrl(url: string): { repo: string; number: number; url: string } | null {
+  const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:[/?#].*)?$/.exec(url);
+  if (!match) return null;
+  const number = Number(match[3]);
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  const repo = `${match[1]}/${match[2]}`.toLowerCase();
+  return { repo, number, url: `https://github.com/${repo}/pull/${number}` };
+}
+
 export const autoFixSchema = z.object({
   enabled: z.boolean(),
   ownerThreadId: z.string(),
@@ -137,7 +147,7 @@ export const hostContract = defineRpcContract({
   fetchPullRequests: {
     experimental_retryable: true,
     input: z
-      .object({ urls: z.array(z.string().url()).min(1) })
+      .object({ urls: z.array(z.string().url()).min(1).max(50) })
       .strict(),
     output: z.object({ results: z.record(z.string(), ghReadSchema) }),
   },

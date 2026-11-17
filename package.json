@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "bb": ">=0.49",
-    "bbPluginSdk": ">=0.6.132"
+    "bb": ">=0.49.0",
+    "bbPluginSdk": ">=0.6.132 <0.7.0"
   },
   "bb": {
     "name": "Thread PRs",
-    "description": "Every pull request a thread and its child threads made, beside the composer: Focus Board links plus each environment branch PR, with live state, checks and review.",
+    "description": "Follow pull requests across a thread and its child threads, with CI, reviews, draft controls and opt-in Auto-fix beside the composer.",
     "branding": {
       "icon": "GitPullRequest"
     },
@@ -17,10 +17,10 @@
     "host": "./host.ts"
   },
   "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.6.132",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
@@ -53,6 +53,15 @@
   "scripts": {
     "build": "bb plugin build",
     "typecheck": "tsc --noEmit",
-    "test": "bb plugin build . && node --test test/server.test.mjs"
-  }
+    "test": "bb plugin build . && node --test test/*.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/artkorotkikh-dfinity/bb-plugin-thread-prs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/artkorotkikh-dfinity/bb-plugin-thread-prs/issues"
+  },
+  "homepage": "https://github.com/artkorotkikh-dfinity/bb-plugin-thread-prs#readme",
+  "license": "MIT"
 }

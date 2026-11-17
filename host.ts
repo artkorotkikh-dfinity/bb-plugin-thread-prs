@@ -1,8 +1,7 @@
 import { execFile } from "node:child_process";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { hostContract, type GhRead, type PrStatus } from "./contract.js";
+import { hostContract, parsePrUrl, type GhRead, type PrStatus } from "./contract.js";
 
-const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+$/;
 const GH_TIMEOUT_MS = 20_000;
 
 type GhOutput = { code: number; stdout: string; stderr: string };
@@ -52,20 +51,27 @@ function toStatus(node: Json): PrStatus | null {
   const number = node.number;
   const url = node.url;
   if (typeof number !== "number" || typeof url !== "string") return null;
-  const contexts = obj(
-    obj(obj(obj((obj(node.commits)?.nodes as unknown[] | undefined)?.[0])?.commit)?.statusCheckRollup)
-      ?.contexts,
-  );
+  const commit = obj(obj((obj(node.commits)?.nodes as unknown[] | undefined)?.[0])?.commit);
+  const contexts = obj(obj(commit?.statusCheckRollup)?.contexts);
   // A re-run leaves the earlier run in the rollup: count each check name once, latest run wins,
   // which is also how bb's PR segment counts, so both show the same numbers.
-  const latest = new Map<string, { at: string; ctx: Json }>();
+  const latest = new Map<string, { at: string; pending: boolean; ctx: Json }>();
+  let unsettled = false;
   for (const raw of (contexts?.nodes as unknown[] | undefined) ?? []) {
     const ctx = obj(raw);
     if (ctx === null) continue;
+    // Queued reruns have no startedAt and can otherwise lose to the old failure.
+    // Any unresolved context prevents an automatic fix, even if a newer run exists.
+    const pending = ctx.__typename === "CheckRun" ? ctx.status !== "COMPLETED" : PENDING_STATUS.has(String(ctx.state));
+    if (pending) {
+      unsettled = true;
+    }
     const name = String(ctx.__typename === "CheckRun" ? ctx.name : ctx.context);
     const at = String(ctx.startedAt ?? ctx.createdAt ?? "");
     const seen = latest.get(name);
-    if (seen === undefined || at > seen.at) latest.set(name, { at, ctx });
+    if (seen === undefined || (pending && !seen.pending) || (pending === seen.pending && at > seen.at)) {
+      latest.set(name, { at, pending, ctx });
+    }
   }
   const checks = { passed: 0, failed: 0, pending: 0, total: 0 };
   const failingChecks: NonNullable<PrStatus["failingChecks"]> = [];
@@ -123,7 +129,8 @@ function toStatus(node: Json): PrStatus | null {
     headRefName: typeof node.headRefName === "string" ? node.headRefName : undefined,
     failingChecks,
     // An incomplete rollup cannot establish that every check has finished.
-    checksComplete: obj(contexts?.pageInfo)?.hasNextPage === false || contexts === null,
+    checksComplete: !unsettled && commit !== null &&
+      (commit.statusCheckRollup === null || obj(contexts?.pageInfo)?.hasNextPage === false),
     latestChangesRequested: (() => {
       const review = obj((obj(node.reviews)?.nodes as unknown[] | undefined)?.[0]);
       if (typeof review?.id !== "string") return null;
@@ -143,7 +150,7 @@ async function fetchPullRequests(
 ): Promise<Record<string, GhRead>> {
   const results: Record<string, GhRead> = {};
   const valid = urls.filter((url) => {
-    if (PR_URL.test(url)) return true;
+    if (parsePrUrl(url)) return true;
     results[url] = { ok: false, message: "Not a github.com pull request URL" };
     return false;
   });
@@ -151,7 +158,7 @@ async function fetchPullRequests(
   const query = `query {\n${valid
     .map((url, index) => `p${index}: resource(url: ${JSON.stringify(url)}) { ... on PullRequest { ${FIELDS} } }`)
     .join("\n")}\n}`;
-  const out = await runGh(["api", "graphql", "-f", `query=${query}`], signal);
+  const out = await runGh(["api", "graphql", "--hostname", "github.com", "-f", `query=${query}`], signal);
   let parsed: Json | null = null;
   try {
     parsed = obj(JSON.parse(out.stdout));
@@ -166,17 +173,21 @@ async function fetchPullRequests(
   }
   // A partial GraphQL error (one PR not found or not visible) nulls only its alias.
   const errors = Array.isArray(parsed?.errors) ? (parsed.errors as unknown[]) : [];
+  if (out.code !== 0 && errors.length === 0) {
+    for (const url of valid) results[url] = { ok: false, message: firstLine(out.stderr || "gh failed") };
+    return results;
+  }
   valid.forEach((url, index) => {
     const alias = `p${index}`;
     const node = obj(data[alias]);
-    const status = node === null ? null : toStatus(node);
+    const error = errors
+      .map(obj)
+      .find((entry) => !Array.isArray(entry?.path) || entry.path[0] === alias);
+    const status = node === null || error ? null : toStatus(node);
     if (status !== null) {
       results[url] = { ok: true, pr: status };
       return;
     }
-    const error = errors
-      .map(obj)
-      .find((entry) => Array.isArray(entry?.path) && entry.path[0] === alias);
     results[url] = {
       ok: false,
       message: typeof error?.message === "string" ? error.message : "GitHub returned no pull request",
@@ -192,7 +203,7 @@ export default experimental_defineHostEntry({
       results: await fetchPullRequests(urls, context.signal),
     }),
     markReady: async ({ url }, context) => {
-      if (!PR_URL.test(url)) return { ok: false, message: "Not a github.com pull request URL" };
+      if (!parsePrUrl(url)) return { ok: false, message: "Not a github.com pull request URL" };
       const out = await runGh(["pr", "ready", url], context.signal);
       return out.code === 0
         ? { ok: true, message: firstLine(out.stdout || out.stderr || "Marked ready") }

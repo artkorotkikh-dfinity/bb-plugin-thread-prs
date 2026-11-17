@@ -3,7 +3,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
+import { experimental_scanPublicSdkOnly } from "@get-bb/plugin-sdk/testing";
+import { fileURLToPath } from "node:url";
 import plugin from "../dist/server.js";
+
+test("the plugin imports only public SDK and declared host shims", () => {
+  const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)), {
+    allow: [/^(react|clsx|tailwind-merge)$/],
+  });
+  assert.deepEqual(result.violations, []);
+  assert.deepEqual(result.privateDependencies, []);
+});
 
 const url = (n) => `https://github.com/o/r/pull/${n}`;
 const status = (n, state, updatedAt = "2026-11-17T10:00:00Z", checks = "passing") => ({
@@ -53,7 +63,7 @@ const LINKS = {
   ],
 };
 
-function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], readPr } = {}) {
+function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], readPr, environmentHost = () => "host-1" } = {}) {
   const hostCalls = [];
   const rpcCalls = [];
   const sends = [];
@@ -76,7 +86,7 @@ function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], r
           return { threads: threadIds.map((threadId) => ({ threadId, metadata: { linkedIssues: links[threadId] ?? [] } })) };
         },
       },
-      environments: { get: async ({ environmentId }) => ({ id: environmentId, hostId: "host-1" }) },
+      environments: { get: async ({ environmentId }) => ({ id: environmentId, hostId: environmentHost(environmentId) }) },
       plugins: {
         callRpc: async ({ pluginId, method, input }) => {
           rpcCalls.push({ pluginId, method, input });
@@ -97,7 +107,7 @@ function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], r
       };
       return {
         results: Object.fromEntries(
-          input.urls.map((u) => [u, readPr ? readPr(u) : { ok: true, pr: byNumber[Number(u.split("/").pop())] }]),
+          input.urls.map((u) => [u, readPr ? readPr(u, hostId) : { ok: true, pr: byNumber[Number(u.split("/").pop())] }]),
         ),
       };
     },
@@ -285,7 +295,7 @@ async function tick(t, harness) {
   const sleeping = new Promise((resolve) => { reachedSleep = resolve; });
   const original = globalThis.setTimeout;
   const timer = t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => {
-    const result = original(fn, ms, ...args);
+    const result = original(fn, ms === 30_000 ? 0 : ms, ...args);
     if (ms === 120_000) reachedSleep();
     return result;
   });
@@ -550,4 +560,88 @@ test("setAutoFix refuses enabling completed PRs and archived or deleted owners",
     assert.equal((await env.harness.behavior.callRpc("setAutoFix", { threadId: "R", url: url(10), enabled: true })).ok, false);
   }
   assert.equal(env.sends.length, 0);
+});
+
+test("descendant reads and Mark ready use their own machine", async (t) => {
+  const { bb, harness, hostCalls } = setup({ environmentHost: (id) => id === "eC" ? "child-host" : "root-host" });
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  await list(harness);
+  const reads = hostCalls.filter((call) => call.method === "fetchPullRequests");
+  assert.equal(reads.length, 2);
+  assert.deepEqual(reads.find((call) => call.hostId === "child-host").input.urls, [url(12)]);
+  assert.ok(!reads.find((call) => call.hostId === "root-host").input.urls.includes(url(12)));
+  const ready = await harness.behavior.callRpc("markReady", { threadId: "R", url: url(12) });
+  assert.equal(ready.ok, true);
+  assert.equal(hostCalls.find((call) => call.method === "markReady").hostId, "child-host");
+});
+
+test("one machine's cached status cannot suppress another machine's GitHub read", async (t) => {
+  const links = { R: [{ repo: "o/r", issue: 42, kind: "pull" }], C: [{ repo: "O/R", issue: 42, kind: "pull" }] };
+  const { bb, harness, rows, hostCalls } = setup({
+    links, descendantIds: ["C"], environmentHost: (id) => id === "eC" ? "child-host" : "root-host",
+    readPr: (u, hostId) => hostId === "root-host" ? { ok: true, pr: status(42, "open") } : { ok: false, message: "child cannot read this PR" },
+  });
+  rows.eR = rows.eC = { outcome: "absent" };
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  assert.equal((await list(harness)).items[0].status.state, "open");
+  const child = await harness.behavior.runCli(["list", "C", "--json"]);
+  const item = JSON.parse(child.stdout).items[0];
+  assert.equal(item.status, null);
+  assert.equal(item.error, "child cannot read this PR");
+  assert.deepEqual(hostCalls.map((call) => call.hostId), ["root-host", "child-host"]);
+});
+
+test("a transient unavailable environment does not permanently cache a missing machine", async (t) => {
+  let available = false;
+  const { bb, harness, rows, hostCalls } = setup({ descendantIds: [], links: {}, environmentHost: () => available ? "root-host" : null });
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  await list(harness);
+  assert.equal(hostCalls.length, 0);
+  available = true;
+  await list(harness);
+  assert.equal(hostCalls.length, 1);
+  assert.equal(hostCalls[0].hostId, "root-host");
+});
+
+test("a removed link suspends Auto-fix and the saved subscription can still be disabled", async (t) => {
+  const links = { R: [{ repo: "o/r", issue: 42, kind: "pull" }] };
+  const env = autoFixSetup(t, { links, descendantIds: [] });
+  await plugin(env.bb);
+  await enable(env.harness, 42);
+  links.R = [];
+  await tick(t, env.harness);
+  assert.equal(env.sends.length, 0);
+  const stopped = await env.harness.behavior.runCli(["autofix", url(42), "off", "R"]);
+  assert.equal(stopped.exitCode, 0, stopped.stderr);
+});
+
+test("the background worker gives plugin registration time before its first read", async (t) => {
+  const env = autoFixSetup(t);
+  await plugin(env.bb);
+  await enable(env.harness);
+  env.advance();
+  const before = env.hostCalls.length;
+  const service = env.harness.behavior.runService("auto-fix");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(env.hostCalls.length, before);
+  assert.equal(env.sends.length, 0);
+  service.controller.abort();
+  await service.done;
+});
+
+test("a watcher read during candidate activation retries without caching a startup error", async (t) => {
+  let ready = false;
+  const { bb, harness, hostCalls } = setup({ descendantIds: [], links: {}, readPr: () => {
+    if (!ready) { ready = true; throw new Error("host plugin calls are unavailable during factory registration; call from a handler, service, or timer"); }
+    return { ok: true, pr: status(10, "open") };
+  } });
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  const item = (await list(harness)).items[0];
+  assert.equal(item.error, null);
+  assert.equal(item.status.state, "open");
+  assert.equal(hostCalls.length, 2);
 });

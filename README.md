@@ -8,6 +8,19 @@ tags: [bb, plugin, pull-requests]
 Shows every GitHub pull request a bb thread and its child threads made, not only the
 PR of the environment's current branch.
 
+## Requirements
+
+- BB 0.49.0 or newer with Plugin SDK 0.6.132–0.6.x. The plugin uses experimental
+  SDK surfaces and should be checked against a new SDK minor version before upgrading.
+- The [GitHub CLI](https://cli.github.com/) installed and signed in on each machine
+  that owns a thread's environment. Reads and **Mark ready** use that machine's
+  current `gh` account. GitHub Enterprise Server is not supported.
+- BB's bundled GitHub PR Status plugin supplies branch PRs. The separately installed
+  [Focus Board](https://github.com/cristoslc/bb-plugin-focus-board) plugin supplies
+  explicit PR links; without it, branch PRs still work.
+- Auto-fix uses the owner thread's configured agent, permissions, and provider quota
+  or billing. It starts work only after you explicitly enable it for that PR.
+
 ## What it lists
 
 For the open thread and every descendant thread (archived and hidden included):
@@ -41,8 +54,9 @@ or the first thread that linked the PR when there is no branch source. The optio
 CLI thread id identifies the list containing the PR; it does not override the owner.
 
 While enabled, a background service checks the PR every two minutes, even without
-an open list. It shares the list's cache and batches stale enabled PRs into one host
-call per machine per poll. A new failing-check set or changes-requested review
+an open list. The first poll waits 30 seconds for plugin registration. It shares the
+list's machine-scoped cache and batches stale enabled PRs into host calls of up to
+50 PRs per machine. A new failing-check set or changes-requested review
 triggers a short request to the owner: fix the named branch, push, and reply with
 what changed. The request includes the PR URL, failing checks and their links (or
 the reviewer), identifies the Thread PRs plugin, and says
@@ -65,7 +79,11 @@ Guardrails:
   without delivering it. A send error disables Auto-fix; explicitly enable it
   again to retry. It never automatically repeats an ambiguously delivered send.
 - Failed GitHub reads never trigger from retained status. Branch/head details
-  must come from a complete successful read by this plugin.
+  must come from a complete successful read by this plugin. A partial GraphQL error,
+  missing commit data, or any queued or running check prevents an automatic request.
+- If neither the owner's links nor its environment's branch PR still associate
+  it with the PR, polling pauses. You can still turn off its saved subscription with
+  `bb thread-prs autofix <pr-url> off [thread-id]` after its row disappears.
 
 The toggle shows **Auto-fix** when off, **Auto-fix on** when enabled, then a local
 time such as **Sent 12:04 (1/3)**. State is stored per PR in the plugin's
@@ -100,8 +118,10 @@ bb plugin config thread-prs set completedPullRequests activeOnly
 
 ## Freshness
 
-Status comes from one batched `gh api graphql` call on the thread's machine, using
-whatever `gh` is logged in there. The server caches each PR: 30 s while checks run,
+Status comes from batched `gh api graphql` calls on each PR owner's machine, using
+whatever `gh` is logged in there. A branch source takes priority over a link source;
+a linking thread without an environment uses the root thread's machine. Reads from
+different machines have separate caches. The server caches each PR: 30 s while checks run,
 2 min for other open PRs, 15 min for merged or closed, 1 min after an error. It reads
 GitHub while some client shows the thread (`bb.rpc.experimental_whileWatched`),
 and also polls explicitly enabled Auto-fix PRs in the background,
@@ -133,9 +153,33 @@ bb thread-prs autofix <pr-url> on|off [thread-id]  # toggle Auto-fix for a liste
 ```bash
 npm install --include=dev
 npm run typecheck
-npm test             # builds, then runs test/server.test.mjs in the SDK's fake plugin host
+npm test               # builds, then runs server and host-entry regression tests
+bb plugin types --check .
 bb plugin dev .        # rebuild + reload on save
 ```
 
 `package.json` pins `csstype` to 3.2.3 through `overrides`: npm returned 404 for the
 3.2.4 tarball when this was scaffolded.
+
+The test suite uses fake BB threads and a private `gh` executable fixture. It never
+marks a real PR ready or sends work to a real agent. Builds from Git omit development
+dependencies, so the SDK used by the host entry is a runtime dependency.
+
+## Data and limitations
+
+PR status is read directly from GitHub. Auto-fix settings and attempt history stay
+in this plugin's BB storage; the plugin adds no telemetry or external backend.
+GitHub credentials stay in the machine's existing `gh` configuration. Auto-fix sends
+the PR URL, branch, failing check names and links, and reviewer identity to the
+owner's agent, which uses its existing model provider.
+
+The list reads at most 200 threads and 50 distinct PRs, and labels truncated results.
+Provider-internal subagents are not BB child threads: link their PRs on Focus Board
+to include them. Auto-fix skips rollups above 100 contexts rather than acting on
+partial CI data. It cannot guarantee a fix, and an attempt reserved just before a
+crash may be consumed without delivery. Avoid running another automatic PR fixer
+on the same thread and PR.
+
+## License
+
+MIT; see [LICENSE](./LICENSE).

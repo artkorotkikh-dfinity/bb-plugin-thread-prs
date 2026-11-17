@@ -16,7 +16,7 @@ import {
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
 import { autoFixLabel, rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
-import { cn } from "@/lib/utils";
+import { cn } from "./lib/utils";
 
 // Same tokens and icons as bb's GitHub PR Status plugin, so both segments read as siblings.
 const STATE = {
@@ -78,7 +78,7 @@ type DesktopBridge = { openExternalUrl?: (url: string) => void };
 // path (the desktop app's window.bbDesktop bridge, else a new tab) and may need updating
 // if a bb release renames that bridge.
 function openInSystemBrowser(url: string): void {
-  const desktop = (window as unknown as { bbDesktop?: DesktopBridge }).bbDesktop;
+  const desktop = (window as Window & { bbDesktop?: DesktopBridge }).bbDesktop;
   if (typeof desktop?.openExternalUrl === "function") desktop.openExternalUrl(url);
   else window.open(url, "_blank", "noopener,noreferrer");
 }
