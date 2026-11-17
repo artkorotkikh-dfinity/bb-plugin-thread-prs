@@ -41,17 +41,14 @@ newest number first inside each.
     have **Mark ready**; open and draft PRs have **Auto-fix** at the end. There is no
     expanded list. As space narrows, review hides first, then checks text while its
     icon stays visible, and the title truncates to fit.
-  - **Two or three PRs**: a linked chip per PR with its state dot, number, checks mark,
-    and a small lightning icon when Auto-fix is on. Each tooltip shows the repository,
-    title, state, checks, review, and Auto-fix state.
-  - **Four or more PRs**: `PRs N`, up to three open or draft chips (newest first),
-    `+K open` for additional active PRs, and a completed count (`+M closed`, `+M merged`,
-    or `+M done` when both are present).
-  A separate chevron expands the full list for two or more PRs. Mixed-repository lists
-  prefix numbers with the repository name. Links follow **Open pull requests in**;
-  modifier clicks keep their normal behavior. Chips and the chevron support keyboard
-  focus. The segment appears only in the banner row and is hidden when the thread's
-  only visible PR is its own branch PR (bb's segment already shows that one).
+  - **Two or more PRs**: one compact summary button with the pull-request icon,
+    `PRs N` (`Active PRs N` under **Active only**) and one state dot per visible PR,
+    up to six. Clicking the summary toggles the full list; it supports keyboard focus
+    and has an accessible label describing the count and any hidden items.
+  Mixed-repository lists prefix numbers with the repository name. Links follow
+  **Open pull requests in**; modifier clicks keep their normal behavior. The segment
+  appears only in the banner row and is hidden when the thread's only visible PR is
+  its own branch PR (bb's segment already shows that one).
 - **Thread context card** (when bb shows the card instead of the row): a "Pull requests"
   section with one row per PR.
 
