@@ -632,11 +632,11 @@ export default async function plugin(bb: BbPluginApi) {
         reportAutoFix(key, "Waiting for complete CI data"); continue;
       }
       const failing = pr.failingChecks ?? [];
-      // Inline feedback uses thread keys, even for CHANGES_REQUESTED reviews.
-      // Keep the existing review trigger for reviews without inline threads.
-      const review = pr.review === "changes_requested" && !pr.reviewThreads?.length ? pr.latestChangesRequested : null;
+      // The review's own count survives later replies and is independent of sampled thread history.
+      const latestReview = pr.review === "changes_requested" ? pr.latestChangesRequested : null;
+      const review = latestReview?.inlineCommentCount === 0 ? latestReview : null;
       if (!failing.length && !review && !comments.length && !conflict) {
-        reportAutoFix(key, pr.mergeable === "UNKNOWN" ? "Waiting for mergeability" : conflictKey ? "Already requested for this merge conflict" : actionable.length ? "Already requested for these comments" : "No action needed"); continue;
+        reportAutoFix(key, latestReview && latestReview.inlineCommentCount === undefined ? "Waiting for review data" : pr.mergeable === "UNKNOWN" ? "Waiting for mergeability" : conflictKey ? "Already requested for this merge conflict" : actionable.length ? "Already requested for these comments" : "No action needed"); continue;
       }
       // Prefer checks when both fail; include the review in the same request.
       const triggerKey = JSON.stringify(failing.length
@@ -650,7 +650,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const text = [
         `[Thread PRs plugin · Auto-fix] Fix ${state.url} on branch ${JSON.stringify(pr.headRefName)}.`,
-        conflictKey ? `Merge conflict: the base moved. PR #${pr.number} (${JSON.stringify(pr.title)}) now targets ${JSON.stringify(pr.baseRefName)} (${pr.baseRefOid}). If the previous base of this stacked PR was merged, GitHub may have retargeted it; use the current base named here. Merge the current base ${JSON.stringify(pr.baseRefName)} into ${JSON.stringify(pr.headRefName)} (do not rebase), resolve the conflicts, run the project's checks, and push normally.` : null,
+        conflict ? `Merge conflict: the base moved. PR #${pr.number} (${JSON.stringify(pr.title)}) now targets ${JSON.stringify(pr.baseRefName)} (${pr.baseRefOid}). If the previous base of this stacked PR was merged, GitHub may have retargeted it; use the current base named here. Merge the current base ${JSON.stringify(pr.baseRefName)} into ${JSON.stringify(pr.headRefName)} (do not rebase), resolve the conflicts, run the project's checks, and push normally.` : null,
         ...failing.map((check) => `Failing check: ${JSON.stringify(check.name)} — ${check.detailsUrl ?? `${state.url}/checks`}`),
         review ? `Reviewer ${JSON.stringify(review.author ?? "unknown")} requested changes (${review.id}).` : null,
         ...comments.map((thread) => {
@@ -661,11 +661,11 @@ export default async function plugin(bb: BbPluginApi) {
         }),
         comments.length
           ? `Check each comment against the code; Copilot comments are often wrong. Fix only the valid ones on ${JSON.stringify(pr.headRefName)} and push. Don't reply on GitHub or resolve threads; don't merge, close or force-push. Reply here with what you fixed and which comments you rejected and why.`
-          : conflictKey ? null : "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
-        conflictKey ? "Don't merge, close or force-push. Reply here with what conflicted and how you resolved it." : null,
+          : conflict ? null : "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
+        conflict ? "Don't merge, close or force-push. Reply here with what conflicted and how you resolved it." : null,
       ].filter(Boolean).join("\n");
       const summary = [
-        conflictKey ? "merge conflict" : null,
+        conflict ? "merge conflict" : null,
         failing.length ? `${failing.length} failing check${failing.length === 1 ? "" : "s"}` : null,
         review ? "changes requested" : null,
         comments.length ? `${comments.length} review comment${comments.length === 1 ? "" : "s"}` : null,
@@ -808,7 +808,7 @@ export default async function plugin(bb: BbPluginApi) {
       .call("markReady", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
       .catch((error: unknown) => ({ ok: false, message: errorText(error) }));
     if (!result.ok) return result;
-    await refreshAfterAction(threadId, ref);
+    void refreshAfterAction(threadId, ref).catch(() => undefined);
     return result;
   }
 
@@ -827,7 +827,7 @@ export default async function plugin(bb: BbPluginApi) {
       .call("markDraft", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
       .catch((error: unknown) => ({ ok: false, message: errorText(error) }));
     if (!result.ok) return result;
-    await refreshAfterAction(threadId, ref);
+    void refreshAfterAction(threadId, ref).catch(() => undefined);
     return result;
   }
 

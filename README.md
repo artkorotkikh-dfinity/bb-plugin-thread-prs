@@ -38,7 +38,8 @@ newest number first inside each.
 - **Context row above the composer**: right after bb's own PR segment, using the PRs
   visible under **Completed pull requests**:
   - **One PR**: inline state icon, linked number and title, checks, and review. Drafts
-    have **Mark ready**; open and draft PRs have **Auto-fix** at the end. There is no
+    have **Mark ready**; open and draft PRs have **Auto-fix** at the end, followed by
+    the same three-dot action menu as the list. There is no
     expanded list. As space narrows, review hides first, then checks text while its
     icon stays visible, and the title truncates to fit.
   - **Two or more PRs**: one compact summary button with the pull-request icon,
@@ -51,6 +52,11 @@ newest number first inside each.
   its own branch PR (bb's segment already shows that one).
 - **Thread context card** (when bb shows the card instead of the row): a "Pull requests"
   section with one row per PR.
+
+When the sole PR belongs to the current branch, the visible PR badge and committed
+file counts come from BB's built-in **GitHub PR Status** and **Git** plugins.
+Their visibility is controlled by those plugins' settings. Thread PRs adds its
+own controls when its additional PR view is visible.
 
 Each row: state, `#number`, title, checks, review, where it came from ("This branch" or the
 child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
@@ -150,6 +156,10 @@ Guardrails:
   messages. Archived, deleted and unavailable owners never receive requests.
 - Uses the head commit plus sorted failing check names, or the head commit plus
   the latest changes-requested review id for reviews without inline threads.
+  The latest review's own inline-comment count decides whether it uses the inline
+  thread rules; older resolved or unrelated threads do not suppress a new general
+  review. Replies by the PR author do not turn an inline review into a new general
+  trigger. An unknown inline-comment count waits for a complete review read.
   Reviews with inline threads use the thread rules below. The same trigger is not sent twice in
   a row, including after a plugin reload. When both checks and review fail,
   the check trigger takes precedence and the message includes both.
@@ -277,7 +287,7 @@ bb thread-prs autofix <pr-url> on|off [thread-id]  # toggle Auto-fix for a liste
 ```bash
 npm install --include=dev
 npm run typecheck
-npm test               # builds, then runs server and host-entry regression tests
+npm test               # builds, then runs server, host and frontend regression tests
 bb plugin types --check .
 bb plugin dev .        # rebuild + reload on save
 ```
@@ -288,6 +298,10 @@ bb plugin dev .        # rebuild + reload on save
 The test suite uses fake BB threads and a private `gh` executable fixture. It never
 changes a real PR, retries a real workflow or sends work to a real agent. Builds from Git omit development
 dependencies, so the SDK used by the host entry is a runtime dependency.
+Frontend tests use the public SDK test runtime with Testing Library and JSDOM,
+including the single-PR menu and the multiple-to-single-PR transition. The TypeScript
+test loader and DOM dependencies are development-only. Draft/ready actions return
+the confirmed GitHub result before the background status refresh completes.
 
 ## Data and limitations
 

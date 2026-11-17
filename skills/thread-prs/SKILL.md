@@ -21,7 +21,7 @@ pagination does not expand Auto-fix's first-50-thread policy.
 (`gh pr ready --undo`). It refuses unlisted, draft, merged and closed PRs. The UI
 offers **Mark as draft** in the three-dot menu only for open PRs, with one click
 and no confirmation; **Mark ready** reverses it. Both commands refresh the list
-and bb's PR status for branch PRs after success.
+and bb's PR status for branch PRs in the background after acknowledging GitHub's result.
 
 `bb thread-prs autofix <pr-url> on|off [thread-id]` toggles Auto-fix for a listed
 open or draft PR. It is off by default. Only enable it when the user asks: it sends
@@ -42,7 +42,9 @@ The background poll runs every two minutes, waits for an idle owner, and skips
 archived/deleted owners and completed PRs. Check and changes-requested review
 triggers wait for settled, complete CI and dedupe by head plus failing checks or
 latest changes-requested review without inline threads. Reviews with inline
-feedback use thread keys. Unresolved review threads from Copilot or people
+feedback use thread keys. The review's own inline-comment count determines this;
+unrelated older threads and author replies do not retrigger a general review.
+Unknown review metadata waits for another read. Unresolved review threads from Copilot or people
 also trigger, including `COMMENTED` reviews, without waiting for CI. Of the first
 50 threads, only unresolved, non-outdated threads whose last comment is not by the
 PR author are actionable. Sent thread-id/last-comment-id keys survive pushes,

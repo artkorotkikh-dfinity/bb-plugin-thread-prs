@@ -9,7 +9,7 @@ import plugin from "../dist/server.js";
 
 test("the plugin imports only public SDK and declared host shims", () => {
   const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)), {
-    allow: [/^(react|clsx|tailwind-merge|sonner|@radix-ui\/react-tooltip|@radix-ui\/react-alert-dialog|@radix-ui\/react-dropdown-menu)$/],
+    allow: [/^(react|clsx|tailwind-merge|sonner|jsdom|@testing-library\/react|@radix-ui\/react-tooltip|@radix-ui\/react-alert-dialog|@radix-ui\/react-dropdown-menu)$/],
   });
   assert.deepEqual(result.violations, []);
   assert.deepEqual(result.privateDependencies, []);
@@ -259,6 +259,26 @@ test("a confirmed write returns before a slow status refresh",async(t)=>{
   assert.equal(result.ok,true);
 });
 
+for (const method of ["markReady", "markDraft"]) {
+  test(`${method} acknowledges a confirmed write without waiting for status refresh`, async (t) => {
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    const state = method === "markReady" ? "draft" : "open";
+    const env = setup({ onRefresh: () => pending,
+      readPr: u => ({ ok: true, pr: status(Number(u.split("/").pop()), state) }) });
+    env.rows.eC = builtinRow(12, state, "2026-11-17T10:00:00Z");
+    t.after(async () => { release({ ok: true }); await env.harness.lifecycle.dispose(); });
+    await plugin(env.bb);
+    await list(env.harness);
+    const result = await Promise.race([
+      env.harness.behavior.callRpc(method, { threadId: "R", url: url(12) }),
+      new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error("Write response waited for status refresh")), 1000); timer.unref(); }),
+    ]);
+    assert.equal(result.ok, true);
+    assert.equal(env.hostCalls.filter(call => call.method === method).length, 1);
+  });
+}
+
 test("mark ready: only listed drafts, and bb's PR segment is refreshed for branch PRs", async () => {
   const { bb, harness, hostCalls, rpcCalls } = setup();
   await plugin(bb);
@@ -321,6 +341,7 @@ test("mark draft uses the branch owner's machine, drops cached status and refres
   const before = harness.inspection.experimental_rpcInvalidations.length;
   const result = await harness.behavior.callRpc("markDraft", { threadId: "R", url: url(12) });
   assert.deepEqual(result, { ok: true, message: "marked as draft" });
+  await new Promise(resolve => setImmediate(resolve)); // The status update follows the acknowledgement.
   assert.deepEqual(hostCalls.filter((call) => call.method === "markDraft"), [
     { method: "markDraft", input: { url: url(12) }, hostId: "child-host" },
   ]);
@@ -636,7 +657,7 @@ for (const comments of [false, true]) {
     const env = autoFixSetup(t);
     const pr = conflictStatus({ ...failingStatus(), checksComplete: false,
       ...(comments ? { authorLogin: "pr-author", reviewThreads: [reviewThread()] } : {}),
-      review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice" },
+      review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice", inlineCommentCount: 0 },
     });
     pr.checks.pending = 1;
     env.setPr(pr);
@@ -743,7 +764,7 @@ test("Auto-fix stops after 3 sends and explicit re-enable resets attempts", asyn
 
 test("Auto-fix triggers on changes requested, using the latest review id", async (t) => {
   const env = autoFixSetup(t);
-  const pr = { ...status(10, "draft"), review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice" } };
+  const pr = { ...status(10, "draft"), review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice", inlineCommentCount: 0 } };
   env.setPr(pr);
   await plugin(env.bb);
   await enable(env.harness);
@@ -753,11 +774,70 @@ test("Auto-fix triggers on changes requested, using the latest review id", async
   env.advance();
   await tick(t, env.harness);
   assert.equal(env.sends.length, 1);
-  env.setPr({ ...pr, latestChangesRequested: { id: "review-2", author: "bob" } });
+  env.setPr({ ...pr, latestChangesRequested: { id: "review-2", author: "bob", inlineCommentCount: 0 } });
   env.advance();
   await tick(t, env.harness);
   assert.equal(env.sends.length, 2);
 });
+
+for (const history of [{ isResolved: true }, { isOutdated: true }, {}]) {
+  test(`old inline history cannot suppress a newer general review: ${JSON.stringify(history)}`, async (t) => {
+    const env = autoFixSetup(t);
+    const old = reviewThread(history);
+    const pr = commentedStatus({ review: "changes_requested", reviewThreads: [old],
+      latestChangesRequested: { id: "review-new", author: "alice", inlineCommentCount: 0 } });
+    env.setPr(pr);
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1);
+    assert.match(env.sends[0].input[0].text, /Reviewer "alice" requested changes \(review-new\)/);
+    env.advance(); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1, "the same review is not requested twice");
+  });
+}
+
+test("inline replies belonging to the latest review retain thread dedupe", async (t) => {
+  const env = autoFixSetup(t);
+  const pr = commentedStatus({ review: "changes_requested", latestChangesRequested: { id: "reply-review", author: "alice", inlineCommentCount: 1 },
+    reviewThreads: [reviewThread({ lastComment: { id: "reply", author: "alice" } })] });
+  env.setPr(pr);
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  assert.equal(env.sends.length, 1);
+  assert.doesNotMatch(env.sends[0].input[0].text, /Reviewer .* requested changes/);
+  env.setPr({ ...pr, headRefOid: "head-2" }); env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 1);
+  env.setPr({ ...pr, headRefOid: "head-2", reviewThreads: [reviewThread({ lastComment: { id: "author-reply", author: "pr-author" } })] });
+  env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 1, "an author reply must not re-trigger the general review");
+});
+
+test("an unknown review comment count waits instead of guessing the review type", async (t) => {
+  const env = autoFixSetup(t);
+  env.setPr({ ...status(10, "open"), review: "changes_requested", latestChangesRequested: { id: "unknown-review", author: "alice" } });
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  assert.equal(env.sends.length, 0);
+  const state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+  assert.equal(state.activity, "Waiting for review data");
+});
+
+for (const trigger of ["comment", "check", "review"]) {
+  test(`a new ${trigger} does not repeat a previously requested conflict`, async (t) => {
+    const env = autoFixSetup(t);
+    env.setPr(conflictStatus());
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    env.setPr(trigger === "comment" ? conflictStatus(commentedStatus()) :
+      trigger === "check" ? conflictStatus(failingStatus()) :
+        conflictStatus({ review: "changes_requested", latestChangesRequested: { id: "new-review", author: "alice", inlineCommentCount: 0 } }));
+    env.advance(); await tick(t, env.harness);
+    assert.equal(env.sends.length, 2);
+    const message = env.sends[1].input[0].text;
+    assert.doesNotMatch(message, /Merge conflict:|Merge the current base|what conflicted/);
+    assert.match(message, trigger === "comment" ? /Review comment:/ : trigger === "check" ? /Failing check:/ : /Reviewer "alice" requested changes/);
+    if (trigger === "review") assert.match(message, /Fix on that branch, push/);
+    const state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+    assert.doesNotMatch(state.lastSentSummary, /merge conflict/);
+    assert.equal(state.sentConflictKeys.length, 1);
+  });
+}
 
 test("Auto-fix handles COMMENTED reviews once per thread and last comment across pushes, reload and re-enable", async (t) => {
   const env = autoFixSetup(t);
@@ -811,7 +891,7 @@ for (const change of [
 
 test("a changes-requested review with inline feedback also dedupes by thread across pushes", async (t) => {
   const env = autoFixSetup(t);
-  const pr = commentedStatus({ review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice" } });
+  const pr = commentedStatus({ review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice", inlineCommentCount: 1 } });
   env.setPr(pr);
   await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
   env.setPr({ ...pr, headRefOid: "head-2" }); env.advance(); await tick(t, env.harness);

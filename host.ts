@@ -39,7 +39,7 @@ const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefO
     firstComment: comments(first: 1) { nodes { id author { login } body url } }
     lastComment: comments(last: 1) { nodes { id author { login } } }
   } }
-  reviews(last: 1, states: [CHANGES_REQUESTED]) { nodes { id author { login } } }
+  reviews(last: 1, states: [CHANGES_REQUESTED]) { nodes { id author { login } comments { totalCount } } }
   reviewRequests(first: 1) { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
     pageInfo { hasNextPage }
@@ -202,7 +202,9 @@ function toStatus(node: Json): PrStatus | null {
       const review = obj((obj(node.reviews)?.nodes as unknown[] | undefined)?.[0]);
       if (typeof review?.id !== "string") return null;
       const author = obj(review.author)?.login;
-      return { id: review.id, author: typeof author === "string" ? author : null };
+      const count = obj(review.comments)?.totalCount;
+      return { id: review.id, author: typeof author === "string" ? author : null,
+        inlineCommentCount: typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : undefined };
     })(),
     authorLogin: typeof obj(node.author)?.login === "string" ? String(obj(node.author)!.login) : null,
     unresolvedReviewThreadCount: completeThreadCount(node.reviewThreads),

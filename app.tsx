@@ -435,10 +435,7 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
             <span aria-hidden>·</span><UnresolvedComments count={status.unresolvedReviewThreadCount} />
           </span>
         ) : null}
-        <span className="ml-auto flex shrink-0 items-center gap-0.5">
-          {status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
-          {active ? <AutoFixButton threadId={threadId} item={item} /> : null}
-        </span>
+        <PrActions threadId={threadId} item={item} />
       </div>
     </div>
   );

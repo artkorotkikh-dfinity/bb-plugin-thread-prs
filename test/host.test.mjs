@@ -170,6 +170,18 @@ test("batched reads include PR authors and aliased first/last review comments fo
   assert.match(query, /lastComment: comments\(last: 1\)/);
 });
 
+test("latest review metadata distinguishes general feedback from inline feedback", async t => {
+  const general = pr(1), inline = pr(2), unknown = pr(3);
+  general.reviews.nodes[0].comments = { totalCount: 0 };
+  inline.reviews.nodes[0].comments = { totalCount: 2 };
+  const fixture = await setup(t, { data: { p0: general, p1: inline, p2: unknown } });
+  const { results } = await fixture.call([url(1), url(2), url(3)]);
+  assert.equal(results[url(1)].pr.latestChangesRequested.inlineCommentCount, 0);
+  assert.equal(results[url(2)].pr.latestChangesRequested.inlineCommentCount, 2);
+  assert.equal(results[url(3)].pr.latestChangesRequested.inlineCommentCount, undefined);
+  assert.match((await fixture.args()).at(-1), /reviews\(last: 1, states: \[CHANGES_REQUESTED\]\).*comments \{ totalCount \}/);
+});
+
 test("nested GraphQL failure rejects its PR while preserving other aliases", async (t) => {
   const partial = pr();
   partial.commits.nodes[0].commit.statusCheckRollup = null;

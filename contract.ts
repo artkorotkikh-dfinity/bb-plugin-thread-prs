@@ -49,7 +49,7 @@ export const prStatusSchema = z.object({
   mergeStateStatus: z.string().optional(),
   failingChecks: z.array(z.object({ name: z.string(), detailsUrl: z.string().nullable() })).optional(),
   checksComplete: z.boolean().optional(),
-  latestChangesRequested: z.object({ id: z.string(), author: z.string().nullable() }).nullable().optional(),
+  latestChangesRequested: z.object({ id: z.string(), author: z.string().nullable(), inlineCommentCount: z.number().int().nonnegative().optional() }).nullable().optional(),
   authorLogin: z.string().nullable().optional(),
   reviewThreads: z.array(reviewThreadSchema).optional(),
   /** All unresolved review conversations, including outdated ones; null until a complete read. */
