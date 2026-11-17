@@ -10,6 +10,7 @@ import {
   experimental_useRpcQuery,
   experimental_useThreadContextKind,
   useBbNavigate,
+  useSettings,
   type ExperimentalThreadContextCardProps,
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
@@ -46,11 +47,35 @@ function hasExtras(data: ThreadPrs | undefined): data is ThreadPrs {
   return data !== undefined && data.items.some((item) => item.key !== data.ownBranchKey);
 }
 
-function useOpenUrl() {
+type DesktopBridge = { openExternalUrl?: (url: string) => void };
+
+// The SDK has no "open in the system browser" call. This mirrors bb's own external-browser
+// path (the desktop app's window.bbDesktop bridge, else a new tab) and may need updating
+// if a bb release renames that bridge.
+function openInSystemBrowser(url: string): void {
+  const desktop = (window as unknown as { bbDesktop?: DesktopBridge }).bbDesktop;
+  if (typeof desktop?.openExternalUrl === "function") desktop.openExternalUrl(url);
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/** Opens a PR where the plugin setting says; returns false to let the link's default run. */
+function useOpenPullRequest(): (url: string) => boolean {
   const navigate = useBbNavigate();
+  const target = useSettings().values?.openPullRequestsIn;
+  return (url: string) => {
+    if (target === "system") {
+      openInSystemBrowser(url);
+      return true;
+    }
+    return navigate.openUrl(url);
+  };
+}
+
+function useOpenUrl() {
+  const openPullRequest = useOpenPullRequest();
   return (url: string) => (event: MouseEvent) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if (navigate.openUrl(url)) event.preventDefault();
+    if (openPullRequest(url)) event.preventDefault();
   };
 }
 
@@ -288,7 +313,7 @@ function useSegmentVisible({ threadId }: ExperimentalThreadContextSegmentInput):
 
 function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
   const { data } = useThreadPrs(threadId);
-  const navigate = useBbNavigate();
+  const openPullRequest = useOpenPullRequest();
   if (!hasExtras(data)) return null;
   return (
     <>
@@ -327,7 +352,7 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
             }
             action={status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : undefined}
             onClick={() => {
-              if (!navigate.openUrl(item.url)) window.open(item.url, "_blank", "noopener,noreferrer");
+              if (!openPullRequest(item.url)) window.open(item.url, "_blank", "noopener,noreferrer");
             }}
           />
         );

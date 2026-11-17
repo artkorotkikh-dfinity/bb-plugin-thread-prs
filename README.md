@@ -27,6 +27,20 @@ Each row: state, `#number`, title, checks, review, where it came from ("This bra
 child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
 (`gh pr ready`). There are no other actions.
 
+## Settings
+
+`Open pull requests in` (`openPullRequestsIn`): `bb` (default) opens a clicked PR the way
+bb opens any link, following Settings → General → Links; `system` always opens it in the
+system browser. Change it in bb's plugin settings or with:
+
+```bash
+bb plugin config thread-prs set openPullRequestsIn system
+```
+
+The system-browser path calls the desktop app's `window.bbDesktop.openExternalUrl`, the
+same bridge bb uses for its own external links, and falls back to a new tab in a web
+client. It is not a Plugin SDK API, so a bb release could rename it.
+
 ## Freshness
 
 Status comes from one batched `gh api graphql` call on the thread's machine, using

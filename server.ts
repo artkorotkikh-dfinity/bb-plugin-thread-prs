@@ -153,6 +153,19 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export default async function plugin(bb: BbPluginApi) {
+  // Read by the app through useSettings(); the server only declares it.
+  bb.settings.define({
+    openPullRequestsIn: {
+      type: "select",
+      label: "Open pull requests in",
+      description:
+        "Where a click on a PR in the list opens it. bb's browser follows Settings → General → Links.",
+      options: ["bb", "system"],
+      experimental_optionLabels: { bb: "bb's browser", system: "System browser" },
+      default: "bb",
+    },
+  });
+
   const host = bb.hosts.experimental_client({ contract: hostContract });
   const cache = new Map<string, CacheEntry>();
   const hostByEnvironment = new Map<string, string | null>();
