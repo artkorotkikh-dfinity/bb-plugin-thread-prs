@@ -104,8 +104,8 @@ an open list. Enabling Auto-fix wakes that worker immediately; it does not wait 
 the next two-minute poll. On reload, the first automatic poll waits 30 seconds for
 plugin registration. It shares the
 list's machine-scoped cache and batches stale enabled PRs into host calls of up to
-50 PRs per machine. A new failing-check set, changes-requested review, or actionable
-unresolved review comment triggers a request to the owner. Comments from Copilot
+50 PRs per machine. A merge conflict, new failing-check set, changes-requested review,
+or actionable unresolved review comment triggers a request to the owner. Comments from Copilot
 and people count even when GitHub records their review as `COMMENTED` and leaves
 the PR's review decision at `REVIEW_REQUIRED`.
 
@@ -115,13 +115,28 @@ author, up to 600 characters of its body, and its URL. It asks the agent to chec
 each comment against the code because Copilot comments are often wrong, fix only
 valid ones on the named branch and push, then report fixes and rejected comments
 with reasons. It forbids GitHub replies, resolving threads, merging, closing and
-force-pushing. Checks and new comments share one request when both are present.
+force-pushing. Conflicts, checks and new comments share one request when present together.
+
+A conflict request names the PR, its branch and current base, explains that the base
+moved, and asks the agent to merge that base into the branch, resolve conflicts,
+run the project's checks and push normally. It forbids rebasing and force-pushing,
+and asks for a report of what conflicted and how it was resolved. For stacked PRs,
+the current base may now be `main` after the previous base PR merged; the request
+uses the current base from GitHub rather than the old stack branch.
 
 Guardrails:
 
 - Sends only for open or draft PRs. Check and changes-requested review triggers
   wait for settled, complete CI data (at most 100 contexts). New actionable comments
-  do not wait for pending checks or a complete CI rollup.
+  and confirmed merge conflicts do not wait for pending checks or a complete CI rollup.
+- Fetches `mergeable`, `mergeStateStatus`, `baseRefName` and `baseRefOid` in the
+  same batched query. Only `mergeable: CONFLICTING` triggers a conflict request;
+  `DIRTY` alone does not. GitHub calculates mergeability lazily: `UNKNOWN` shows
+  **Waiting for mergeability**, uses a 30-second cache TTL and is read again on the
+  next tick. It never counts as a conflict. Other trigger kinds still work.
+- Deduplicates conflicts by head SHA + base SHA + `conflict`. A new head or moved
+  base can trigger again. Sent conflict keys survive other trigger kinds, reloads
+  and re-enabling, so the same conflict state cannot repeat.
 - Waits for the owner to be idle, with no active background agents or queued
   messages. Archived, deleted and unavailable owners never receive requests.
 - Uses the head commit plus sorted failing check names, or the head commit plus
@@ -136,7 +151,7 @@ Guardrails:
   trigger again. A request includes only new actionable thread keys.
 - Sends at most three requests before disabling itself with **Stopped after 3
   tries**, shared across all trigger kinds. Clicking it again resets the attempt
-  count but retains sent thread keys. Repeating `on` while already enabled does
+  count but retains sent thread and conflict keys. Repeating `on` while already enabled does
   not reset the limit.
 - Reserves each attempt durably before sending. A crash can consume an attempt
   without delivering it. A send error disables Auto-fix; explicitly enable it
@@ -144,7 +159,8 @@ Guardrails:
 - Failed GitHub reads never trigger from retained status. Branch/head details
   must come from a successful read by this plugin. A partial GraphQL error or missing
   branch/head details prevents any request; incomplete or unsettled CI prevents
-  requests unless there are new actionable comments.
+  requests unless there are new actionable comments or a new confirmed conflict.
+  Conflict requests also require the current base name and SHA.
 - If neither the owner's links nor its environment's branch PR still associate
   it with the PR, polling pauses. You can still turn off its saved subscription with
   `bb thread-prs autofix <pr-url> off [thread-id]` after its row disappears.
@@ -152,13 +168,14 @@ Guardrails:
 The toggle keeps a stable **Auto-fix** label and shows a green dot when enabled.
 Hover it or focus it with the keyboard to see the current activity, target thread,
 last request time, attempt count and purpose, such as
-`Sent 14:02 (1/3) · 1 review comment`. The CLI reports the same summary.
+`Sent 14:02 (1/3) · merge conflict` or `Sent 14:02 (1/3) · 1 review comment`.
+The CLI reports the same summary.
 State is stored per PR in the plugin's
 `bb.storage.kv`, shared across every list containing that PR. Turning it off stops
 future requests; work already sent to an agent continues. The agent uses its
 existing permissions and credentials, so a request does not guarantee a fix.
 
-Routine activity, such as **Waiting for CI**, **Waiting for agent**,
+Routine activity, such as **Waiting for CI**, **Waiting for mergeability**, **Waiting for agent**,
 **No action needed**, **Already requested for this commit**, or
 **Already requested for these comments**, stays in the tooltip
 and remains available to screen readers. An attention icon stays visible when the
@@ -217,7 +234,8 @@ bb plugin config thread-prs set completedPullRequests activeOnly
 Status comes from batched `gh api graphql` calls on each PR owner's machine, using
 whatever `gh` is logged in there. A branch source takes priority over a link source;
 a linking thread without an environment uses the root thread's machine. Reads from
-different machines have separate caches. The server caches each PR: 30 s while checks run,
+different machines have separate caches. The server caches each PR: 30 s while checks run
+or mergeability is `UNKNOWN`,
 2 min for other open PRs, 15 min for merged or closed, 1 min after an error. It reads
 GitHub while some client shows the thread (`bb.rpc.experimental_whileWatched`),
 and also polls explicitly enabled Auto-fix PRs in the background,
@@ -274,7 +292,7 @@ owner's agent, which uses its existing model provider.
 The list reads at most 200 threads and 50 distinct PRs, and labels truncated results.
 Provider-internal subagents are not BB child threads: link their PRs on Focus Board
 to include them. Auto-fix skips CI triggers for rollups above 100 contexts;
-comment triggers remain independent of CI. Only the first 50 review threads are
+comment and conflict triggers remain independent of CI. Only the first 50 review threads are
 inspected. It cannot guarantee a fix, and an attempt reserved just before a
 crash may be consumed without delivery. Avoid running another automatic PR fixer
 on the same thread and PR.

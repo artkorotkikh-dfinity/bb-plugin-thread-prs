@@ -187,7 +187,7 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
       <Tooltip content={
         <span className="flex flex-col gap-1">
           <span className="font-medium">{state.enabled ? "Auto-fix enabled" : "Auto-fix disabled"}</span>
-          <span>{state.stoppedReason ?? state.activity ?? "Enable to monitor CI and review feedback"}</span>
+          <span>{state.stoppedReason ?? state.activity ?? "Enable to monitor CI, review feedback and merge conflicts"}</span>
           {state.lastSentAt === null ? null : (
             <span>{autoFixLastSendLabel(state)}</span>
           )}

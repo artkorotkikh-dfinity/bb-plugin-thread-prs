@@ -43,6 +43,19 @@ test("queued rerun cannot be treated as settled CI", async (t) => {
   assert.deepEqual((await fixture.args()).slice(0, 4), ["api", "graphql", "--hostname", "github.com"]);
 });
 
+test("batched reads carry current base and mergeability, including lazy UNKNOWN", async (t) => {
+  const conflict = { ...pr(1), mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", baseRefName: "main", baseRefOid: "b".repeat(40) };
+  const unknown = { ...pr(2), mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN", baseRefName: "stack", baseRefOid: "c".repeat(40) };
+  const fixture = await setup(t, { data: { p0: conflict, p1: unknown } });
+  const { results } = await fixture.call([url(1), url(2)]);
+  for (const node of [conflict, unknown]) {
+    for (const field of ["mergeable", "mergeStateStatus", "baseRefName", "baseRefOid"]) {
+      assert.equal(results[node.url].pr[field], node[field]);
+      assert.ok((await fixture.args()).at(-1).includes(field));
+    }
+  }
+});
+
 test("batched reads include PR authors and aliased first/last review comments for COMMENTED reviews", async (t) => {
   const node = pr();
   node.author = { login: "pr-author" };

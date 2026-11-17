@@ -32,6 +32,7 @@ function runGh(args: string[], signal: AbortSignal): Promise<GhOutput> {
 }
 
 const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefOid headRefName
+  mergeable mergeStateStatus baseRefName baseRefOid
   author { login }
   reviewThreads(first: 50) { nodes {
     id isResolved isOutdated path line startLine
@@ -134,6 +135,10 @@ function toStatus(node: Json): PrStatus | null {
     updatedAt: typeof node.updatedAt === "string" ? node.updatedAt : new Date(0).toISOString(),
     headRefOid: typeof node.headRefOid === "string" ? node.headRefOid : undefined,
     headRefName: typeof node.headRefName === "string" ? node.headRefName : undefined,
+    baseRefName: typeof node.baseRefName === "string" ? node.baseRefName : undefined,
+    baseRefOid: typeof node.baseRefOid === "string" ? node.baseRefOid : undefined,
+    mergeable: node.mergeable === "MERGEABLE" || node.mergeable === "CONFLICTING" || node.mergeable === "UNKNOWN" ? node.mergeable : undefined,
+    mergeStateStatus: typeof node.mergeStateStatus === "string" ? node.mergeStateStatus : undefined,
     failingChecks,
     // An incomplete rollup cannot establish that every check has finished.
     checksComplete: !unsettled && commit !== null &&
@@ -236,7 +241,7 @@ type ActionPr = z.infer<typeof actionPrSchema> & { status: PrStatus };
 async function readActionPr(url: string, signal: AbortSignal): Promise<ActionPr> {
   const parsed = parsePrUrl(url);
   if (!parsed) throw new Error("Not a github.com pull request URL");
-  const fields = `${FIELDS} baseRefOid baseRefName mergeable mergeStateStatus
+  const fields = `${FIELDS}
     repository { nameWithOwner viewerPermission mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed }`;
   const query = `query { resource(url: ${JSON.stringify(parsed.url)}) { ... on PullRequest { ${fields} } } }`;
   const out = await runGh(["api", "graphql", "--hostname", "github.com", "-f", `query=${query}`], signal);

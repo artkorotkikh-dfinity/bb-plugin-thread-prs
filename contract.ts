@@ -43,6 +43,10 @@ export const prStatusSchema = z.object({
   updatedAt: z.string(),
   headRefOid: z.string().optional(),
   headRefName: z.string().optional(),
+  baseRefName: z.string().optional(),
+  baseRefOid: z.string().optional(),
+  mergeable: z.enum(["MERGEABLE", "CONFLICTING", "UNKNOWN"]).optional(),
+  mergeStateStatus: z.string().optional(),
   failingChecks: z.array(z.object({ name: z.string(), detailsUrl: z.string().nullable() })).optional(),
   checksComplete: z.boolean().optional(),
   latestChangesRequested: z.object({ id: z.string(), author: z.string().nullable() }).nullable().optional(),
@@ -69,6 +73,7 @@ export const autoFixSchema = z.object({
   lastSentAt: z.number().nullable(),
   stoppedReason: z.string().nullable(),
   sentThreadKeys: z.array(z.string()).default([]),
+  sentConflictKeys: z.array(z.string()).default([]),
   lastSentSummary: z.string().nullable().default(null),
 });
 export type AutoFix = z.infer<typeof autoFixSchema>;

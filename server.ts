@@ -129,6 +129,7 @@ type CacheEntry = { status: PrStatus | null; error: string | null; fetchedAt: nu
 function ttlFor(entry: CacheEntry): number {
   if (entry.error !== null || entry.status === null) return TTL_ERROR_MS;
   if (entry.status.state === "merged" || entry.status.state === "closed") return TTL_DONE_MS;
+  if (entry.status.mergeable === "UNKNOWN") return TTL_PENDING_MS;
   if (entry.status.checks.pending > 0 || entry.status.checks.state === "pending") return TTL_PENDING_MS;
   return TTL_OPEN_MS;
 }
@@ -556,9 +557,10 @@ export default async function plugin(bb: BbPluginApi) {
         enabled: true, ownerThreadId: owner.threadId, attempts: 0,
         lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
         sentThreadKeys: previous?.sentThreadKeys ?? [], lastSentSummary: null,
+        sentConflictKeys: previous?.sentConflictKeys ?? [],
         url: ref.url, hostId: hostId ?? ref.hostId,
       } : {
-        ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, sentThreadKeys: [], lastSentSummary: null, url: ref.url, hostId: null }),
+        ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, sentThreadKeys: [], sentConflictKeys: [], lastSentSummary: null, url: ref.url, hostId: null }),
         enabled: false, stoppedReason: null,
       });
       if (enabled) {
@@ -618,23 +620,29 @@ export default async function plugin(bb: BbPluginApi) {
         thread.lastComment.author?.toLowerCase() !== pr.authorLogin.toLowerCase());
       const sentThreadKeys = new Set(state.sentThreadKeys);
       const comments = actionable.filter((thread) => !sentThreadKeys.has(threadKey(thread)));
+      // UNKNOWN is GitHub's lazy calculation, never evidence of a conflict.
+      const conflictKey = pr.mergeable === "CONFLICTING" && pr.headRefOid && pr.baseRefOid && pr.baseRefName
+        ? JSON.stringify([pr.headRefOid, pr.baseRefOid, "conflict"]) : null;
+      const conflict = conflictKey !== null && !state.sentConflictKeys.includes(conflictKey);
       const pending = pr.checks.pending > 0 || pr.checks.state === "pending";
-      if (!comments.length && pending) { reportAutoFix(key, "Waiting for CI"); continue; }
-      if ((!comments.length && pr.checksComplete !== true) || !pr.headRefOid || !pr.headRefName) {
+      if (!comments.length && !conflict && pending) {
+        reportAutoFix(key, pr.mergeable === "UNKNOWN" ? "Waiting for mergeability" : "Waiting for CI"); continue;
+      }
+      if ((!comments.length && !conflict && pr.checksComplete !== true) || !pr.headRefOid || !pr.headRefName) {
         reportAutoFix(key, "Waiting for complete CI data"); continue;
       }
       const failing = pr.failingChecks ?? [];
       // Inline feedback uses thread keys, even for CHANGES_REQUESTED reviews.
       // Keep the existing review trigger for reviews without inline threads.
       const review = pr.review === "changes_requested" && !pr.reviewThreads?.length ? pr.latestChangesRequested : null;
-      if (!failing.length && !review && !comments.length) {
-        reportAutoFix(key, actionable.length ? "Already requested for these comments" : "No action needed"); continue;
+      if (!failing.length && !review && !comments.length && !conflict) {
+        reportAutoFix(key, pr.mergeable === "UNKNOWN" ? "Waiting for mergeability" : conflictKey ? "Already requested for this merge conflict" : actionable.length ? "Already requested for these comments" : "No action needed"); continue;
       }
       // Prefer checks when both fail; include the review in the same request.
       const triggerKey = JSON.stringify(failing.length
         ? [pr.headRefOid, "checks", failing.map((check) => check.name).sort()]
         : review ? [pr.headRefOid, "review", review.id] : null);
-      if (!comments.length && triggerKey === state.lastTriggerKey) { reportAutoFix(key, "Already requested for this commit"); continue; }
+      if (!comments.length && !conflict && triggerKey === state.lastTriggerKey) { reportAutoFix(key, "Already requested for this commit"); continue; }
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
       if (!thread || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" ||
           thread.runtime.displayStatus !== "idle" || thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0) {
@@ -642,6 +650,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const text = [
         `[Thread PRs plugin · Auto-fix] Fix ${state.url} on branch ${JSON.stringify(pr.headRefName)}.`,
+        conflictKey ? `Merge conflict: the base moved. PR #${pr.number} (${JSON.stringify(pr.title)}) now targets ${JSON.stringify(pr.baseRefName)} (${pr.baseRefOid}). If the previous base of this stacked PR was merged, GitHub may have retargeted it; use the current base named here. Merge the current base ${JSON.stringify(pr.baseRefName)} into ${JSON.stringify(pr.headRefName)} (do not rebase), resolve the conflicts, run the project's checks, and push normally.` : null,
         ...failing.map((check) => `Failing check: ${JSON.stringify(check.name)} — ${check.detailsUrl ?? `${state.url}/checks`}`),
         review ? `Reviewer ${JSON.stringify(review.author ?? "unknown")} requested changes (${review.id}).` : null,
         ...comments.map((thread) => {
@@ -652,9 +661,11 @@ export default async function plugin(bb: BbPluginApi) {
         }),
         comments.length
           ? `Check each comment against the code; Copilot comments are often wrong. Fix only the valid ones on ${JSON.stringify(pr.headRefName)} and push. Don't reply on GitHub or resolve threads; don't merge, close or force-push. Reply here with what you fixed and which comments you rejected and why.`
-          : "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
+          : conflictKey ? null : "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
+        conflictKey ? "Don't merge, close or force-push. Reply here with what conflicted and how you resolved it." : null,
       ].filter(Boolean).join("\n");
       const summary = [
+        conflictKey ? "merge conflict" : null,
         failing.length ? `${failing.length} failing check${failing.length === 1 ? "" : "s"}` : null,
         review ? "changes requested" : null,
         comments.length ? `${comments.length} review comment${comments.length === 1 ? "" : "s"}` : null,
@@ -664,6 +675,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...state, attempts: state.attempts + 1,
         lastTriggerKey: failing.length || review ? triggerKey : state.lastTriggerKey,
         sentThreadKeys: [...sentThreadKeys, ...comments.map(threadKey)],
+        sentConflictKeys: conflict ? [...state.sentConflictKeys, conflictKey] : state.sentConflictKeys,
       };
       if (next.attempts >= 3) {
         next.enabled = false;

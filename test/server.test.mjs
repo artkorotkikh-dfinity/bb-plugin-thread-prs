@@ -482,6 +482,10 @@ const reviewThread = (change = {}) => ({
 const commentedStatus = (change = {}) => ({
   ...status(10, "open"), authorLogin: "pr-author", reviewThreads: [reviewThread()], ...change,
 });
+const conflictStatus = (change = {}) => ({
+  ...status(10, "open"), mergeable: "CONFLICTING", mergeStateStatus: "DIRTY",
+  baseRefName: "main", baseRefOid: "base-1", ...change,
+});
 
 async function tick(t, harness) {
   let reachedSleep;
@@ -516,7 +520,7 @@ function autoFixSetup(t, options = {}) {
   return {
     ...env,
     setPr(value) { pr = value; },
-    advance() { now += 120_000; },
+    advance(ms = 120_000) { now += ms; },
   };
 }
 
@@ -564,6 +568,111 @@ test("Auto-fix sends once per failing head, dedupes sorted names, and survives r
   const state = (await list(reloaded.harness)).items.find((item) => item.number === 10).autoFix;
   assert.equal(state.attempts, 2);
   assert.equal(typeof state.lastSentAt, "number");
+});
+
+for (const state of ["open", "draft"]) {
+  test(`Auto-fix sends once for a conflict (state=${state}), including after reload and re-enable`, async (t) => {
+    const env = autoFixSetup(t);
+    env.setPr(conflictStatus({ state }));
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1);
+    const message = env.sends[0].input[0].text;
+    for (const part of [url(10), "PR #10", '"fix/pr-10"', "the base moved", 'now targets "main"',
+      'Merge the current base "main" into "fix/pr-10" (do not rebase)',
+      "resolve the conflicts, run the project's checks, and push normally.",
+      "Don't merge, close or force-push. Reply here with what conflicted and how you resolved it."]) assert.ok(message.includes(part), part);
+    let autoFix = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+    assert.equal(autoFix.lastSentSummary, "merge conflict");
+    assert.deepEqual(autoFix.sentConflictKeys, [JSON.stringify(["head-1", "base-1", "conflict"])]);
+    assert.match(autoFix.activity, /Sent .* · merge conflict/);
+    assert.match((await env.harness.behavior.runCli(["list", "R"])).stdout, /Sent .* · merge conflict/);
+    env.advance(); await tick(t, env.harness);
+    const reloaded = await env.harness.lifecycle.reload(plugin);
+    t.after(() => reloaded.harness.lifecycle.dispose());
+    await tick(t, reloaded.harness);
+    await reloaded.harness.behavior.callRpc("setAutoFix", { threadId: "R", url: url(10), enabled: false });
+    await enable(reloaded.harness); await tick(t, reloaded.harness);
+    assert.equal(env.sends.length, 1);
+  });
+}
+
+test("Auto-fix retries a conflict for a new head or moved base and shares the attempt limit", async (t) => {
+  const env = autoFixSetup(t);
+  env.setPr(conflictStatus());
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  env.setPr(conflictStatus({ headRefOid: "head-2" })); env.advance(); await tick(t, env.harness);
+  env.setPr(conflictStatus()); env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 2, "returning to an already sent head/base state does not repeat it");
+  env.setPr(conflictStatus({ headRefOid: "head-2", baseRefOid: "base-2", baseRefName: "release" })); env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 3);
+  assert.match(env.sends[2].input[0].text, /Merge the current base "release"/);
+  const autoFix = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+  assert.equal(autoFix.enabled, false); assert.equal(autoFix.stoppedReason, "Stopped after 3 tries");
+});
+
+test("UNKNOWN and DIRTY alone never trigger; next tick reads mergeability again", async (t) => {
+  const env = autoFixSetup(t);
+  env.setPr(conflictStatus({ mergeable: "UNKNOWN" }));
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  assert.equal(env.sends.length, 0);
+  assert.equal((await list(env.harness)).items.find(item => item.number === 10).autoFix.activity, "Waiting for mergeability");
+  assert.match((await env.harness.behavior.runCli(["list", "R"])).stdout, /Waiting for mergeability/);
+  env.advance(30_000); await tick(t, env.harness);
+  assert.equal(env.sends.length, 0);
+  assert.ok(env.hostCalls.length >= 2);
+  env.setPr(conflictStatus()); env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 1);
+});
+
+test("DIRTY without CONFLICTING does not trigger a merge-conflict request", async (t) => {
+  const env = autoFixSetup(t);
+  env.setPr(conflictStatus({ mergeable: "MERGEABLE" }));
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  assert.equal(env.sends.length, 0);
+});
+
+for (const comments of [false, true]) {
+  test(`conflicts bypass pending/incomplete CI and combine triggers in one message (comments=${comments})`, async (t) => {
+    const env = autoFixSetup(t);
+    const pr = conflictStatus({ ...failingStatus(), checksComplete: false,
+      ...(comments ? { authorLogin: "pr-author", reviewThreads: [reviewThread()] } : {}),
+      review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice" },
+    });
+    pr.checks.pending = 1;
+    env.setPr(pr);
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1);
+    assert.match(env.sends[0].input[0].text, /Merge conflict:/);
+    assert.match(env.sends[0].input[0].text, /Failing check: "unit"/);
+    if (comments) assert.match(env.sends[0].input[0].text, /Review comment:/);
+    else assert.match(env.sends[0].input[0].text, /Reviewer "alice" requested changes/);
+    env.setPr({ ...pr, checks: { ...pr.checks, pending: 0 }, checksComplete: true });
+    env.advance(); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1, "included triggers don't replay after CI settles");
+    assert.equal((await list(env.harness)).items.find(item => item.number === 10).autoFix.attempts, 1);
+  });
+}
+
+for (const change of [{ baseRefName: undefined }, { baseRefOid: undefined }, { headRefOid: undefined }, { headRefName: undefined }]) {
+  test(`conflict requests require current branch/head/base details: ${JSON.stringify(change)}`, async (t) => {
+    const env = autoFixSetup(t);
+    env.setPr(conflictStatus(change));
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    assert.equal(env.sends.length, 0);
+  });
+}
+
+test("conflicts still wait for an idle owner and share attempts with checks and comments", async (t) => {
+  const threads = { ...THREADS, R: { ...THREADS.R } };
+  const env = autoFixSetup(t, { threads });
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  env.setPr(conflictStatus()); env.advance(); threads.R.queuedMessageCount = 1;
+  await tick(t, env.harness);
+  assert.equal(env.sends.length, 1);
+  threads.R.queuedMessageCount = 0; await tick(t, env.harness);
+  env.setPr(commentedStatus()); env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 3);
+  assert.equal((await list(env.harness)).items.find(item => item.number === 10).autoFix.enabled, false);
 });
 
 for (const busy of [
