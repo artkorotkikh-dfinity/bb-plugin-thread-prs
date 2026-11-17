@@ -12,6 +12,19 @@ deduplicated by `owner/repo#number`. Without a thread id it uses the calling thr
 `bb thread-prs ready <pr-url> [thread-id]` marks one listed draft PR ready for review
 (`gh pr ready`). It refuses PRs that are not listed for the thread or not drafts.
 
+`bb thread-prs autofix <pr-url> on|off [thread-id]` toggles Auto-fix for a listed
+open or draft PR. It is off by default. Only enable it when the user asks: it sends
+fix requests to the PR's branch-owner thread (or first linking thread) and asks
+that agent to fix the branch and push. The optional thread id selects the list,
+not the owner. `list` includes the Auto-fix state; `--json` includes attempts,
+owner, last trigger, send time and stop reason.
+
+The background poll runs every two minutes, waits for an idle owner and settled
+checks, skips archived/deleted owners and completed PRs, deduplicates triggers by
+head plus failing checks or latest changes-requested review, and stops after
+three attempts. Explicitly re-enabling resets attempts. It never asks the agent
+to merge, close or force-push. See [Auto-fix guardrails](../../README.md#auto-fix).
+
 A PR shows up only if it is linked or is an environment's branch PR. When you open or
 push to a PR from another branch, link it so it appears:
 `bb focus-board link set "$BB_THREAD_ID" <pr-url>`.

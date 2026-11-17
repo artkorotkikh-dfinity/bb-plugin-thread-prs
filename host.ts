@@ -31,11 +31,12 @@ function runGh(args: string[], signal: AbortSignal): Promise<GhOutput> {
   });
 }
 
-// One fragment for every PR: enough for state, checks counts and review, nothing more.
-const FIELDS = `number title url state isDraft updatedAt reviewDecision
+const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefOid headRefName
+  reviews(last: 1, states: [CHANGES_REQUESTED]) { nodes { id author { login } } }
   reviewRequests(first: 1) { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
-    nodes { __typename ... on CheckRun { name status conclusion startedAt } ... on StatusContext { context state createdAt } }
+    pageInfo { hasNextPage }
+    nodes { __typename ... on CheckRun { name status conclusion startedAt detailsUrl } ... on StatusContext { context state createdAt targetUrl } }
   } } } } }`;
 
 const PASSED = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
@@ -67,8 +68,10 @@ function toStatus(node: Json): PrStatus | null {
     if (seen === undefined || at > seen.at) latest.set(name, { at, ctx });
   }
   const checks = { passed: 0, failed: 0, pending: 0, total: 0 };
-  for (const { ctx } of latest.values()) {
+  const failingChecks: NonNullable<PrStatus["failingChecks"]> = [];
+  for (const [name, { ctx }] of latest) {
     checks.total += 1;
+    const failedBefore = checks.failed;
     if (ctx.__typename === "CheckRun") {
       if (ctx.status !== "COMPLETED") checks.pending += 1;
       else if (PASSED.has(String(ctx.conclusion))) checks.passed += 1;
@@ -76,6 +79,10 @@ function toStatus(node: Json): PrStatus | null {
     } else if (ctx.state === "SUCCESS") checks.passed += 1;
     else if (PENDING_STATUS.has(String(ctx.state))) checks.pending += 1;
     else checks.failed += 1;
+    if (checks.failed > failedBefore) {
+      const link = ctx.detailsUrl ?? ctx.targetUrl;
+      failingChecks.push({ name, detailsUrl: typeof link === "string" ? link : null });
+    }
   }
   const checksState =
     checks.failed > 0
@@ -112,6 +119,17 @@ function toStatus(node: Json): PrStatus | null {
     checks: { state: checksState, ...checks },
     review,
     updatedAt: typeof node.updatedAt === "string" ? node.updatedAt : new Date(0).toISOString(),
+    headRefOid: typeof node.headRefOid === "string" ? node.headRefOid : undefined,
+    headRefName: typeof node.headRefName === "string" ? node.headRefName : undefined,
+    failingChecks,
+    // An incomplete rollup cannot establish that every check has finished.
+    checksComplete: obj(contexts?.pageInfo)?.hasNextPage === false || contexts === null,
+    latestChangesRequested: (() => {
+      const review = obj((obj(node.reviews)?.nodes as unknown[] | undefined)?.[0]);
+      if (typeof review?.id !== "string") return null;
+      const author = obj(review.author)?.login;
+      return { id: review.id, author: typeof author === "string" ? author : null };
+    })(),
   };
 }
 

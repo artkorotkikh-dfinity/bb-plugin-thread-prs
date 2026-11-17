@@ -1,3 +1,8 @@
+---
+title: Thread PRs (bb plugin)
+tags: [bb, plugin, pull-requests]
+---
+
 # Thread PRs (bb plugin)
 
 Shows every GitHub pull request a bb thread and its child threads made, not only the
@@ -25,7 +30,48 @@ newest number first inside each.
 
 Each row: state, `#number`, title, checks, review, where it came from ("This branch" or the
 child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
-(`gh pr ready`). There are no other actions.
+(`gh pr ready`). Open and draft rows also have an **Auto-fix** toggle beside it.
+
+## Auto-fix
+
+Auto-fix is **off by default** for every PR. Click **Auto-fix** once on an open or
+draft row to enable it, in either the composer list or the context card. The tooltip
+shows `Auto-fix → <thread title>`. The owner is the thread of the PR's branch source,
+or the first thread that linked the PR when there is no branch source. The optional
+CLI thread id identifies the list containing the PR; it does not override the owner.
+
+While enabled, a background service checks the PR every two minutes, even without
+an open list. It shares the list's cache and batches stale enabled PRs into one host
+call per machine per poll. A new failing-check set or changes-requested review
+triggers a short request to the owner: fix the named branch, push, and reply with
+what changed. The request includes the PR URL, failing checks and their links (or
+the reviewer), identifies the Thread PRs plugin, and says
+"Don't merge, close or force-push."
+
+Guardrails:
+
+- Sends only for open or draft PRs, after every check has finished. Rollups with
+  more than 100 contexts are treated as incomplete and do not trigger Auto-fix.
+- Waits for the owner to be idle, with no active background agents or queued
+  messages. Archived, deleted and unavailable owners never receive requests.
+- Uses the head commit plus sorted failing check names, or the head commit plus
+  the latest changes-requested review id. The same trigger is not sent twice in
+  a row, including after a plugin reload. When both checks and review fail,
+  the check trigger takes precedence and the message includes both.
+- Sends at most three requests before disabling itself with **Stopped after 3
+  tries**. Clicking it again resets the attempt count. Repeating `on` while
+  already enabled does not reset the limit.
+- Reserves each attempt durably before sending. A crash can consume an attempt
+  without delivering it. A send error disables Auto-fix; explicitly enable it
+  again to retry. It never automatically repeats an ambiguously delivered send.
+- Failed GitHub reads never trigger from retained status. Branch/head details
+  must come from a complete successful read by this plugin.
+
+The toggle shows **Auto-fix** when off, **Auto-fix on** when enabled, then a local
+time such as **Sent 12:04 (1/3)**. State is stored per PR in the plugin's
+`bb.storage.kv`, shared across every list containing that PR. Turning it off stops
+future requests; work already sent to an agent continues. The agent uses its
+existing permissions and credentials, so a request does not guarantee a fix.
 
 ## Settings
 
@@ -57,7 +103,8 @@ bb plugin config thread-prs set completedPullRequests activeOnly
 Status comes from one batched `gh api graphql` call on the thread's machine, using
 whatever `gh` is logged in there. The server caches each PR: 30 s while checks run,
 2 min for other open PRs, 15 min for merged or closed, 1 min after an error. It reads
-GitHub only while some client shows the thread (`bb.rpc.experimental_whileWatched`),
+GitHub while some client shows the thread (`bb.rpc.experimental_whileWatched`),
+and also polls explicitly enabled Auto-fix PRs in the background,
 and re-checks the thread's links locally every 30 s. When bb's PR plugin has a newer
 read of a branch PR, that one wins.
 On equal GitHub timestamps, this plugin's read wins because checks can finish without
@@ -78,6 +125,7 @@ bb plugin remove thread-prs
 ```bash
 bb thread-prs list [thread-id] [--json]     # default: the calling thread
 bb thread-prs ready <pr-url> [thread-id]    # mark one listed draft PR ready
+bb thread-prs autofix <pr-url> on|off [thread-id]  # toggle Auto-fix for a listed PR
 ```
 
 ## Develop

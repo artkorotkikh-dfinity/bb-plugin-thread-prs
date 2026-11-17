@@ -30,8 +30,33 @@ export const prStatusSchema = z.object({
   }),
   review: reviewStateSchema,
   updatedAt: z.string(),
+  headRefOid: z.string().optional(),
+  headRefName: z.string().optional(),
+  failingChecks: z.array(z.object({ name: z.string(), detailsUrl: z.string().nullable() })).optional(),
+  checksComplete: z.boolean().optional(),
+  latestChangesRequested: z.object({ id: z.string(), author: z.string().nullable() }).nullable().optional(),
 });
 export type PrStatus = z.infer<typeof prStatusSchema>;
+
+export const autoFixSchema = z.object({
+  enabled: z.boolean(),
+  ownerThreadId: z.string(),
+  attempts: z.number().int().min(0).max(3),
+  lastTriggerKey: z.string().nullable(),
+  lastSentAt: z.number().nullable(),
+  stoppedReason: z.string().nullable(),
+});
+export type AutoFix = z.infer<typeof autoFixSchema>;
+
+export function autoFixLabel(state: AutoFix): string {
+  if (state.stoppedReason) return state.stoppedReason;
+  if (!state.enabled) return "Auto-fix";
+  if (state.lastSentAt !== null) {
+    const time = new Date(state.lastSentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    return `Sent ${time} (${state.attempts}/3)`;
+  }
+  return "Auto-fix on";
+}
 
 export const prSourceSchema = z.object({
   kind: z.enum(["branch", "link"]),
@@ -54,6 +79,7 @@ export const threadPrSchema = z.object({
   /** Where `status` came from: our own gh read, or bb's GitHub PR Status plugin. */
   statusSource: z.enum(["gh", "github-pr-status"]).nullable(),
   fetchedAt: z.number().nullable(),
+  autoFix: autoFixSchema.extend({ ownerThreadTitle: z.string().nullable() }),
 });
 export type ThreadPr = z.infer<typeof threadPrSchema>;
 
@@ -95,6 +121,10 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),
   },
+  setAutoFix: {
+    input: z.object({ threadId: z.string().min(1), url: z.string().url(), enabled: z.boolean() }).strict(),
+    output: z.object({ ok: z.boolean(), message: z.string() }),
+  },
 });
 
 const ghReadSchema = z.discriminatedUnion("ok", [
@@ -107,7 +137,7 @@ export const hostContract = defineRpcContract({
   fetchPullRequests: {
     experimental_retryable: true,
     input: z
-      .object({ urls: z.array(z.string().url()).min(1).max(50) })
+      .object({ urls: z.array(z.string().url()).min(1) })
       .strict(),
     output: z.object({ results: z.record(z.string(), ghReadSchema) }),
   },

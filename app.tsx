@@ -15,7 +15,7 @@ import {
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
-import { rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
+import { autoFixLabel, rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
 import { cn } from "@/lib/utils";
 
 // Same tokens and icons as bb's GitHub PR Status plugin, so both segments read as siblings.
@@ -129,6 +129,8 @@ function Dot({ className }: { className: string }) {
   return <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", className)} />;
 }
 
+const ACTION_BUTTON_CLASS = "inline-flex cursor-pointer items-center whitespace-nowrap rounded border border-border bg-background px-1.5 py-0.5 text-xs text-muted-foreground shadow-xs transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60";
+
 function MarkReadyButton({ threadId, item }: { threadId: string; item: ThreadPr }) {
   const mutation = experimental_useRpcMutation({ contract: rpcContract, method: "markReady" });
   const [failure, setFailure] = useState<string | null>(null);
@@ -152,11 +154,52 @@ function MarkReadyButton({ threadId, item }: { threadId: string; item: ThreadPr 
         type="button"
         onClick={() => void run()}
         disabled={mutation.isPending}
-        className="inline-flex cursor-pointer items-center whitespace-nowrap rounded border border-border bg-background px-1.5 py-0.5 text-xs text-muted-foreground shadow-xs transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        className={ACTION_BUTTON_CLASS}
         aria-label={`Mark pull request #${item.number} ready for review`}
       >
         {mutation.isPending ? "Marking…" : "Mark ready"}
       </button>
+    </span>
+  );
+}
+
+function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr }) {
+  const mutation = experimental_useRpcMutation({ contract: rpcContract, method: "setAutoFix" });
+  const [failure, setFailure] = useState<string | null>(null);
+  const state = item.autoFix;
+  const run = async () => {
+    setFailure(null);
+    try {
+      const result = await mutation.mutate({ threadId, url: item.url, enabled: !state.enabled });
+      if (!result.ok) setFailure(result.message);
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <span className="flex shrink-0 items-center gap-1.5">
+      {failure === null ? null : <span role="alert" title={failure} className="max-w-40 truncate text-destructive-text">{failure}</span>}
+      <button
+        type="button"
+        onClick={() => void run()}
+        disabled={mutation.isPending}
+        aria-pressed={state.enabled}
+        aria-label={`Auto-fix pull request #${item.number}`}
+        title={`Auto-fix → ${state.ownerThreadTitle ?? state.ownerThreadId}`}
+        className={cn(ACTION_BUTTON_CLASS, state.enabled && "bg-state-active text-foreground")}
+      >
+        {autoFixLabel(state)}
+      </button>
+    </span>
+  );
+}
+
+function PrActions({ threadId, item }: { threadId: string; item: ThreadPr }) {
+  if (item.status?.state !== "open" && item.status?.state !== "draft") return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
+      {item.status.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
+      <AutoFixButton threadId={threadId} item={item} />
     </span>
   );
 }
@@ -274,7 +317,7 @@ function PrRow({ threadId, item, ownBranchKey, mixedRepos }: {
         </a>
         <StatusLine item={item} ownBranchKey={ownBranchKey} />
       </span>
-      {status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
+      <PrActions threadId={threadId} item={item} />
     </li>
   );
 }
@@ -406,7 +449,7 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
                 <span className={cn("text-xs", state?.text)}>{state?.label}</span>
               )
             }
-            action={status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : undefined}
+            action={<PrActions threadId={threadId} item={item} />}
             onClick={() => {
               if (!openPullRequest(item.url)) window.open(item.url, "_blank", "noopener,noreferrer");
             }}
