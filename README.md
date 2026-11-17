@@ -1,12 +1,12 @@
 ---
-title: Thread PRs (bb plugin)
+title: Thread PR Manager (bb plugin)
 tags: [bb, plugin, pull-requests]
 ---
 
-# Thread PRs (bb plugin)
+# Thread PR Manager (bb plugin)
 
-Shows every GitHub pull request a bb thread and its child threads made, not only the
-PR of the environment's current branch.
+Manage GitHub pull requests across a BB thread and its child threads. Check CI,
+review feedback and run PR actions beside the composer.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ newest number first inside each.
 
 When the sole PR belongs to the current branch, the visible PR badge and committed
 file counts come from BB's built-in **GitHub PR Status** and **Git** plugins.
-Their visibility is controlled by those plugins' settings. Thread PRs adds its
+Their visibility is controlled by those plugins' settings. Thread PR Manager adds its
 own controls when its additional PR view is visible.
 
 Each row: state, `#number`, title, checks, review, where it came from ("This branch" or the
@@ -76,7 +76,7 @@ a partial number. Auto-fix's first-50-thread policy stays the same.
 The three-dot menu at the end of each PR row contains quick actions, in both the
 composer list and context card. The menu uses one line per action; hover an action
 for its availability explanation or quota note. Screen readers can access the same description.
-Choose which actions appear in **Plugins → Thread PRs → Settings**, using the five
+Choose which actions appear in **Plugins → Thread PR Manager → Settings**, using the five
 **PR menu** switches. All five start enabled; turning all of them off hides the menu.
 These preferences update every list immediately and control menu visibility, not
 GitHub permissions. Auto-fix remains visible beside the menu.

@@ -1,4 +1,4 @@
-// Thread PRs frontend: a context-row segment after bb's own PR segment, and the
+// Thread PR Manager frontend: a context-row segment after bb's own PR segment, and the
 // same list as a thread context card section when the pane shows the card.
 import { useId, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {

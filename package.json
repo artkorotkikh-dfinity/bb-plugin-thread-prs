@@ -7,8 +7,8 @@
     "bbPluginSdk": ">=0.6.132 <0.7.0"
   },
   "bb": {
-    "name": "Thread PRs",
-    "description": "Follow pull requests across a thread and its child threads, with CI, reviews, draft controls and opt-in Auto-fix beside the composer.",
+    "name": "Thread PR Manager",
+    "description": "Manage pull requests across a thread and its child threads. Check CI, review feedback and run PR actions beside the composer.",
     "branding": {
       "icon": "GitPullRequest"
     },

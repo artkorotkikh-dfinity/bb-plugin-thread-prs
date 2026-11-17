@@ -567,7 +567,7 @@ test("Auto-fix sends once per failing head, dedupes sorted names, and survives r
   assert.equal(sends[0].mode, "start");
   assert.equal(sends[0].originPluginId, "thread-prs");
   const message = sends[0].input[0].text;
-  for (const part of [url(10), '"fix/pr-10"', "unit", "https://ci.example/unit", "lint", "https://ci.example/lint", "push", "reply with what changed", "Don't merge, close or force-push.", "Thread PRs plugin"]) {
+  for (const part of [url(10), '"fix/pr-10"', "unit", "https://ci.example/unit", "lint", "https://ci.example/lint", "push", "reply with what changed", "Don't merge, close or force-push.", "Thread PR Manager plugin"]) {
     assert.ok(message.includes(part), part);
   }
   await tick(t, harness);

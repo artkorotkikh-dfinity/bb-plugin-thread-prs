@@ -1,4 +1,4 @@
-// Thread PRs: every pull request a thread and its descendant threads made.
+// Thread PR Manager: every pull request a thread and its descendant threads made.
 //
 // Sources, deduplicated by repo#number:
 //   1. Focus Board links (thread metadata, namespace "focus-board", key "linkedIssues").
@@ -649,7 +649,7 @@ export default async function plugin(bb: BbPluginApi) {
         reportAutoFix(key, "Waiting for agent"); continue;
       }
       const text = [
-        `[Thread PRs plugin · Auto-fix] Fix ${state.url} on branch ${JSON.stringify(pr.headRefName)}.`,
+        `[Thread PR Manager plugin · Auto-fix] Fix ${state.url} on branch ${JSON.stringify(pr.headRefName)}.`,
         conflict ? `Merge conflict: the base moved. PR #${pr.number} (${JSON.stringify(pr.title)}) now targets ${JSON.stringify(pr.baseRefName)} (${pr.baseRefOid}). If the previous base of this stacked PR was merged, GitHub may have retargeted it; use the current base named here. Merge the current base ${JSON.stringify(pr.baseRefName)} into ${JSON.stringify(pr.headRefName)} (do not rebase), resolve the conflicts, run the project's checks, and push normally.` : null,
         ...failing.map((check) => `Failing check: ${JSON.stringify(check.name)} — ${check.detailsUrl ?? `${state.url}/checks`}`),
         review ? `Reviewer ${JSON.stringify(review.author ?? "unknown")} requested changes (${review.id}).` : null,

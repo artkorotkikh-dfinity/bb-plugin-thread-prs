@@ -3,7 +3,7 @@ name: thread-prs
 description: List every GitHub pull request this thread and its child threads made, with state, checks and review, or mark one of them ready or as draft. Use when asked which PRs a thread opened or worked on, or for the status of all of them at once.
 ---
 
-# Thread PRs
+# Thread PR Manager
 
 `bb thread-prs list [thread-id] [--json]` prints every PR of a thread and its
 descendant threads: Focus Board links plus each environment's current-branch PR,
