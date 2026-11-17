@@ -87,16 +87,19 @@ Guardrails:
   it with the PR, polling pauses. You can still turn off its saved subscription with
   `bb thread-prs autofix <pr-url> off [thread-id]` after its row disappears.
 
-The toggle shows **Auto-fix** when off, **Auto-fix on** when enabled, then a local
-time such as **Sent 12:04 (1/3)**. State is stored per PR in the plugin's
+The toggle keeps a stable **Auto-fix** label and shows a green dot when enabled.
+Hover it or focus it with the keyboard to see the current activity, target thread,
+last request time and attempt count. State is stored per PR in the plugin's
 `bb.storage.kv`, shared across every list containing that PR. Turning it off stops
 future requests; work already sent to an agent continues. The agent uses its
 existing permissions and credentials, so a request does not guarantee a fix.
 
-Each enabled row explains its current activity, such as **Waiting for CI**,
-**Waiting for agent**, **No action needed**, or **Already requested for this commit**.
-If the owner differs from the thread you are viewing, its title appears below the
-toggle. The state is shared between sessions: switching sessions does not move the
+Routine activity, such as **Waiting for CI**, **Waiting for agent**,
+**No action needed**, or **Already requested for this commit**, stays in the tooltip
+and remains available to screen readers. An attention icon stays visible when the
+owner, machine, PR link or CI data is unavailable, or the subscription has stopped.
+The target thread is named in the tooltip, including when it differs from the
+thread you are viewing. The state is shared between sessions: switching sessions does not move the
 owner, while turning it off and back on selects the owner from that list again and
 resets the attempt budget. Turning an already enabled subscription on through the
 CLI wakes a check without resetting its owner or attempts.

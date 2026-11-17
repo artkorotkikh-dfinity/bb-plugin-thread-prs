@@ -9,7 +9,7 @@ import plugin from "../dist/server.js";
 
 test("the plugin imports only public SDK and declared host shims", () => {
   const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)), {
-    allow: [/^(react|clsx|tailwind-merge)$/],
+    allow: [/^(react|clsx|tailwind-merge|@radix-ui\/react-tooltip)$/],
   });
   assert.deepEqual(result.violations, []);
   assert.deepEqual(result.privateDependencies, []);

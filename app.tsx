@@ -1,6 +1,6 @@
 // Thread PRs frontend: a context-row segment after bb's own PR segment, and the
 // same list as a thread context card section when the pane shows the card.
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useId, useState, type MouseEvent, type ReactNode } from "react";
 import {
   definePluginApp,
   experimental_Icon as Icon,
@@ -15,8 +15,9 @@ import {
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
-import { autoFixLabel, rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
+import { rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
 import { cn } from "./lib/utils";
+import { Tooltip } from "./lib/tooltip";
 
 // Same tokens and icons as bb's GitHub PR Status plugin, so both segments read as siblings.
 const STATE = {
@@ -167,6 +168,9 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
   const mutation = experimental_useRpcMutation({ contract: rpcContract, method: "setAutoFix" });
   const [failure, setFailure] = useState<string | null>(null);
   const state = item.autoFix;
+  const descriptionId = useId();
+  const warning = state.stoppedReason ?? (state.activity?.includes("unavailable") ||
+    state.activity === "Waiting for PR link" || state.activity === "Waiting for complete CI data" ? state.activity : null);
   const run = async () => {
     setFailure(null);
     try {
@@ -177,23 +181,35 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
     }
   };
   return (
-    <span className="flex shrink-0 flex-col items-end gap-0.5">
+    <span className="flex shrink-0 items-center gap-1.5">
       {failure === null ? null : <span role="alert" title={failure} className="max-w-40 truncate text-destructive-text">{failure}</span>}
-      <button
-        type="button"
-        onClick={() => void run()}
-        disabled={mutation.isPending}
-        aria-pressed={state.enabled}
-        aria-label={`Auto-fix pull request #${item.number}`}
-        title={[`Auto-fix → ${state.ownerThreadTitle ?? state.ownerThreadId}`, state.activity].filter(Boolean).join(" · ")}
-        className={cn(ACTION_BUTTON_CLASS, state.enabled && "bg-state-active text-foreground")}
-      >
-        {autoFixLabel(state)}
-      </button>
-      {state.enabled && state.activity ? <span role="status" title={state.activity} className="max-w-40 truncate text-xs text-muted-foreground">{state.activity}</span> : null}
-      {state.enabled && state.ownerThreadId !== threadId ? (
-        <span title={state.ownerThreadId} className="max-w-40 truncate text-xs text-muted-foreground">→ {state.ownerThreadTitle ?? state.ownerThreadId}</span>
-      ) : null}
+      <Tooltip content={
+        <span className="flex flex-col gap-1">
+          <span className="font-medium">{state.enabled ? "Auto-fix enabled" : "Auto-fix disabled"}</span>
+          <span>{state.stoppedReason ?? state.activity ?? "Enable to monitor CI and review feedback"}</span>
+          {state.lastSentAt === null ? null : (
+            <span>Last request: {new Date(state.lastSentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {state.attempts}/3 attempts</span>
+          )}
+          <span className="text-muted-foreground">Target: {state.ownerThreadTitle ?? state.ownerThreadId}</span>
+        </span>
+      }>
+        <button
+          type="button"
+          onClick={() => void run()}
+          disabled={mutation.isPending}
+          aria-pressed={state.enabled}
+          aria-label={`Auto-fix pull request #${item.number}`}
+          aria-describedby={descriptionId}
+          className="relative inline-flex min-h-10 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {state.enabled ? <Dot className="bg-success" /> : null}
+          {mutation.isPending ? "Updating…" : "Auto-fix"}
+          {warning ? <Icon name="AlertTriangle" className="size-3 text-attention-foreground" aria-hidden /> : null}
+        </button>
+      </Tooltip>
+      <span id={descriptionId} role="status" className="sr-only">
+        {[state.stoppedReason ?? state.activity, `Target: ${state.ownerThreadTitle ?? state.ownerThreadId}`].filter(Boolean).join(". ")}
+      </span>
     </span>
   );
 }
@@ -227,14 +243,14 @@ function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: stri
   } else {
     const checks = checksText(status);
     const review = status.state === "open" || status.state === "draft" ? REVIEW[status.review] : null;
-    parts.push(
+    if (status.state !== "open") parts.push(
       <span key="state" className={STATE[status.state].text}>
         {STATE[status.state].label}
       </span>,
     );
     if (status.state === "open" || status.state === "draft") {
       parts.push(
-        <span key="checks" className={cn("inline-flex items-center gap-1", checks.text)}>
+        <span key="checks" title={`${checks.label}; ${status.checks.passed} passed, ${status.checks.failed} failed, ${status.checks.pending} pending`} className={cn("inline-flex items-center gap-1 tabular-nums", checks.text)}>
           {checks.icon === null ? (
             status.checks.state === "pending" ? <Dot className="bg-attention" /> : null
           ) : (
@@ -278,7 +294,7 @@ function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: stri
     );
   }
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-muted-foreground">
       {parts.map((part, index) => (
         <span key={index} className="flex min-w-0 shrink-0 items-center gap-1.5 last:shrink">
           {index > 0 ? <span aria-hidden>·</span> : null}
