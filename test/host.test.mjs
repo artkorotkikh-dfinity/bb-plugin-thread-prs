@@ -20,12 +20,12 @@ function pr(n = 1, nodes = [check()]) {
 
 // Exercise the built host entry, real execFile argument handling and SDK validation.
 // A private PATH fixture prevents all GitHub reads and writes during these tests.
-async function setup(t, payload, code = 0) {
+async function setup(t, payload, code = 0, stderr = "") {
   const dir = await mkdtemp(path.join(tmpdir(), "thread-prs-host-"));
   const response = path.join(dir, "response.json");
   const args = path.join(dir, "args.json");
-  await writeFile(response, JSON.stringify(payload));
-  await writeFile(path.join(dir, "gh"), `#!/usr/bin/env node\nconst fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(args)}, JSON.stringify(process.argv.slice(2))); process.stdout.write(fs.readFileSync(${JSON.stringify(response)})); process.exitCode = ${code};\n`, { mode: 0o700 });
+  await writeFile(response, typeof payload === "string" ? payload : JSON.stringify(payload));
+  await writeFile(path.join(dir, "gh"), `#!/usr/bin/env node\nconst fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(args)}, JSON.stringify(process.argv.slice(2))); process.stdout.write(fs.readFileSync(${JSON.stringify(response)})); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = ${code};\n`, { mode: 0o700 });
   const previousPath = process.env.PATH;
   process.env.PATH = `${dir}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${previousPath}`;
   const harness = experimental_createHostEntryHarness(entry);
@@ -104,5 +104,22 @@ test("global GraphQL errors reject all PRs and invalid URLs never reach gh", asy
   assert.equal((await fixture.call([invalid])).results[invalid].ok, false);
   const result = await fixture.harness.experimental_call("markReady", { url: invalid });
   assert.equal(result.ok, false);
+  const draft = await fixture.harness.experimental_call("markDraft", { url: invalid });
+  assert.deepEqual(draft, { ok: false, message: "Not a github.com pull request URL" });
   assert.equal((await fixture.args())[0], "api", "invalid mutation did not invoke gh");
+});
+
+test("mark draft runs gh pr ready --undo with the URL as one argument", async (t) => {
+  const fixture = await setup(t, "Marked as draft\n");
+  assert.deepEqual(await fixture.harness.experimental_call("markDraft", { url: url(1) }), {
+    ok: true, message: "Marked as draft",
+  });
+  assert.deepEqual(await fixture.args(), ["pr", "ready", "--undo", url(1)]);
+});
+
+test("mark draft returns the first line of gh failures", async (t) => {
+  const fixture = await setup(t, "", 1, "Permission denied\nMore details\n");
+  assert.deepEqual(await fixture.harness.experimental_call("markDraft", { url: url(1) }), {
+    ok: false, message: "Permission denied",
+  });
 });

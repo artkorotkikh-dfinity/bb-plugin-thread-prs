@@ -96,23 +96,25 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
 }) {
   const retry = experimental_useRpcMutation({ contract: rpcContract, method: "rerunFailedCi" });
   const copilot = experimental_useRpcMutation({ contract: rpcContract, method: "requestCopilotReview" });
+  const draft = experimental_useRpcMutation({ contract: rpcContract, method: "markDraft" });
   const prepare = experimental_useRpcMutation({ contract: rpcContract, method: "prepareMerge" });
   const pluginId = experimental_usePluginId();
   const settings = useSettings().values;
   const showDiff = settings?.showViewDiffAction !== false;
   const showRetry = settings?.showRerunFailedCiAction !== false;
   const showCopilot = settings?.showCopilotReviewAction !== false;
+  const showDraft = settings?.showMarkDraftAction !== false;
   const showMerge = settings?.showMergeAction !== false;
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<ConfirmedMerge | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false);
   const active = item.status?.state === "open" || item.status?.state === "draft";
-  const hasItems = showDiff || (active && (showRetry || showCopilot || showMerge));
+  const hasItems = showDiff || (active && (showRetry || showCopilot || showMerge)) || (item.status?.state === "open" && showDraft);
   useEffect(() => {
     if (!hasItems) setMenuOpen(false);
   }, [hasItems]);
-  const busy = retry.isPending || copilot.isPending || prepare.isPending || confirmation !== null;
+  const busy = retry.isPending || copilot.isPending || draft.isPending || prepare.isPending || confirmation !== null;
   const expectedHead = commitOidSchema.safeParse(item.status?.headRefOid).data;
   const retryReason = busy ? "Another action is running" : item.error ? "Refresh GitHub status first" :
     !expectedHead ? "Loading the current commit" : !item.status?.checks.failed ? "No failed checks to retry" : null;
@@ -120,7 +122,7 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
     item.status?.state === "draft" ? "Mark the draft ready before merging" :
       !item.status?.checksComplete ? "Complete CI data is required before merging" :
         item.status.checks.failed || item.status.checks.pending ? "Wait for passing CI checks" : null;
-  const run = async (action: "retry" | "copilot" | "merge") => {
+  const run = async (action: "retry" | "copilot" | "draft" | "merge") => {
     if (busyRef.current || busy) return;
     busyRef.current = true;
     try {
@@ -132,7 +134,9 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
         if (action === "retry" && !expectedHead) return;
         const result = action === "retry" && expectedHead
           ? await retry.mutate({ threadId, url: item.url, expectedHead })
-          : await copilot.mutate({ threadId, url: item.url });
+          : action === "draft"
+            ? await draft.mutate({ threadId, url: item.url })
+            : await copilot.mutate({ threadId, url: item.url });
         if (result.ok) toast.success(result.message);
         else toast.error(result.message);
       }
@@ -167,6 +171,8 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
               reason={retryReason} pending={retry.isPending} onSelect={() => void run("retry")} /> : null}
             {active && showCopilot ? <MenuAction label="Copilot review" hint="Uses Copilot quota" icon="Bot"
               reason={busy ? "Another action is running" : null} pending={copilot.isPending} onSelect={() => void run("copilot")} /> : null}
+            {item.status?.state === "open" && showDraft ? <MenuAction label="Mark as draft" hint="Can be reversed with Mark ready" icon="GitPullRequestDraft"
+              reason={busy ? "Another action is running" : item.error ? "Refresh GitHub status first" : null} pending={draft.isPending} onSelect={() => void run("draft")} /> : null}
             {active && showMerge ? <MenuAction label="Merge…" hint="Review and confirm before merging" icon="GitMerge"
               reason={mergeReason} pending={prepare.isPending} onSelect={() => void run("merge")} /> : null}
           </DropdownMenu.Content>

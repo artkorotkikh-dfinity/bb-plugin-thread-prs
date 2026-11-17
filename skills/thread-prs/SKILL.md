@@ -1,6 +1,6 @@
 ---
 name: thread-prs
-description: List every GitHub pull request this thread and its child threads made, with state, checks and review, or mark one of them ready. Use when asked which PRs a thread opened or worked on, or for the status of all of them at once.
+description: List every GitHub pull request this thread and its child threads made, with state, checks and review, or mark one of them ready or as draft. Use when asked which PRs a thread opened or worked on, or for the status of all of them at once.
 ---
 
 # Thread PRs
@@ -11,6 +11,12 @@ deduplicated by `owner/repo#number`. Without a thread id it uses the calling thr
 
 `bb thread-prs ready <pr-url> [thread-id]` marks one listed draft PR ready for review
 (`gh pr ready`). It refuses PRs that are not listed for the thread or not drafts.
+
+`bb thread-prs draft <pr-url> [thread-id]` marks one listed open PR as draft
+(`gh pr ready --undo`). It refuses unlisted, draft, merged and closed PRs. The UI
+offers **Mark as draft** in the three-dot menu only for open PRs, with one click
+and no confirmation; **Mark ready** reverses it. Both commands refresh the list
+and bb's PR status for branch PRs after success.
 
 `bb thread-prs autofix <pr-url> on|off [thread-id]` toggles Auto-fix for a listed
 open or draft PR. It is off by default. Only enable it when the user asks: it sends
@@ -51,15 +57,16 @@ A PR shows up only if it is linked or is an environment's branch PR. When you op
 push to a PR from another branch, link it so it appears:
 `bb focus-board link set "$BB_THREAD_ID" <pr-url>`.
 
-The row's three-dot menu offers View diff, Re-run failed CI, Copilot review and Merge. These are
-manual UI actions, not additional CLI commands. CI retries only failed GitHub Actions
+The row's three-dot menu offers View diff, Re-run failed CI, Copilot review, Mark as draft
+and Merge. Diff, CI retry, Copilot review and Merge are manual UI actions without
+additional CLI commands. CI retries only failed GitHub Actions
 jobs on the current head and can use runner minutes. Copilot review uses the active
 GitHub account's permissions and Copilot quota. Merge opens a two-minute, one-use
 confirmation for the exact head and target; it keeps branches and does not bypass
 rules or enqueue a required merge queue. Do not invoke a mutation just to test a
 button. An ambiguous write is never automatically retried: check GitHub first.
 
-The extension settings independently show or hide each item through four **PR menu**
+The extension settings independently show or hide each item through five **PR menu**
 switches (default on). Keys: `showViewDiffAction`, `showRerunFailedCiAction`,
-`showCopilotReviewAction`, `showMergeAction`. These control visibility, not GitHub
+`showCopilotReviewAction`, `showMarkDraftAction`, `showMergeAction`. These control visibility, not GitHub
 permissions. When no enabled action applies, the menu is hidden. Auto-fix stays visible.

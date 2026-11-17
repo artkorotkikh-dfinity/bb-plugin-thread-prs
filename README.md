@@ -61,8 +61,8 @@ child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
 The three-dot menu at the end of each PR row contains quick actions, in both the
 composer list and context card. The menu uses one line per action; hover an action
 for its availability explanation or quota note. Screen readers can access the same description.
-Choose which actions appear in **Plugins → Thread PRs → Settings**, using the four
-**PR menu** switches. All four start enabled; turning all of them off hides the menu.
+Choose which actions appear in **Plugins → Thread PRs → Settings**, using the five
+**PR menu** switches. All five start enabled; turning all of them off hides the menu.
 These preferences update every list immediately and control menu visibility, not
 GitHub permissions. Auto-fix remains visible beside the menu.
 
@@ -76,6 +76,8 @@ GitHub permissions. Auto-fix remains visible beside the menu.
 - **Copilot review** requests a new review through GitHub's Copilot code-review API,
   preserving human reviewers. It requires Copilot eligibility, quota and pull-request
   write permission; an existing pending request is reported without another retry.
+- **Mark as draft** appears only for open PRs and runs `gh pr ready --undo` with one
+  click, without confirmation. Use **Mark ready** on the draft to reverse it.
 - **Merge** first reads fresh GitHub state, then shows a confirmation with the PR,
   source/target branches, exact commit and repository-supported merge methods. The
   confirmation expires after two minutes and can be used once. Submission checks
@@ -174,10 +176,10 @@ skip decisions were not recorded.
 
 ## Settings
 
-The **PR menu: View diff**, **PR menu: Re-run failed CI**, **PR menu: Copilot review**
-and **PR menu: Merge** switches independently show or hide those menu items. Their
-keys are `showViewDiffAction`, `showRerunFailedCiAction`, `showCopilotReviewAction`
-and `showMergeAction`; each defaults to `true`. For example:
+The **PR menu: View diff**, **PR menu: Re-run failed CI**, **PR menu: Copilot review**,
+**PR menu: Mark as draft** and **PR menu: Merge** switches independently show or hide
+those menu items. Their keys are `showViewDiffAction`, `showRerunFailedCiAction`, `showCopilotReviewAction`,
+`showMarkDraftAction` and `showMergeAction`; each defaults to `true`. For example:
 
 ```bash
 bb plugin config thread-prs set showMergeAction false
@@ -239,6 +241,7 @@ bb plugin remove thread-prs
 ```bash
 bb thread-prs list [thread-id] [--json]     # default: the calling thread
 bb thread-prs ready <pr-url> [thread-id]    # mark one listed draft PR ready
+bb thread-prs draft <pr-url> [thread-id]    # mark one listed open PR as draft
 bb thread-prs autofix <pr-url> on|off [thread-id]  # toggle Auto-fix for a listed PR
 ```
 

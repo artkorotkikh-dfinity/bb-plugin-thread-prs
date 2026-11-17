@@ -98,6 +98,7 @@ function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], r
     experimental_callHostRpc: async ({ method, input, hostId }) => {
       hostCalls.push({ method, input, hostId });
       if (method === "markReady") return { ok: true, message: "marked" };
+      if (method === "markDraft" && !onAction) return { ok: true, message: "marked as draft" };
       if (method !== "fetchPullRequests" && onAction) return onAction({ method, input, hostId });
       const byNumber = {
         9: status(9, "closed"),
@@ -280,6 +281,91 @@ test("mark ready: only listed drafts, and bb's PR segment is refreshed for branc
   );
   await harness.lifecycle.dispose();
 });
+
+test("mark draft refuses unlisted PRs before making host calls", async (t) => {
+  const { bb, harness, hostCalls } = setup();
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  const result = await harness.behavior.callRpc("markDraft", { threadId: "R", url: url(500) });
+  assert.deepEqual(result, { ok: false, message: "That pull request is not listed for this thread." });
+  assert.equal(hostCalls.length, 0);
+});
+
+for (const [number, state] of [[12, "draft"], [11, "merged"], [9, "closed"]]) {
+  test(`mark draft refuses a listed ${state} PR through RPC and CLI`, async (t) => {
+    const { bb, harness, hostCalls } = setup();
+    t.after(() => harness.lifecycle.dispose());
+    await plugin(bb);
+    await list(harness);
+    const result = await harness.behavior.callRpc("markDraft", { threadId: "R", url: url(number) });
+    assert.equal(result.ok, false);
+    assert.match(result.message, new RegExp(`must be open.*current state: ${state}`));
+    const cli = await harness.behavior.runCli(["draft", url(number), "R"]);
+    assert.equal(cli.exitCode, 1);
+    assert.equal(cli.stderr, result.message);
+    assert.equal(hostCalls.filter((call) => call.method === "markDraft").length, 0);
+  });
+}
+
+test("mark draft uses the branch owner's machine, drops cached status and refreshes bb's PR segment", async (t) => {
+  let state = "open";
+  const { bb, harness, hostCalls, rpcCalls, rows } = setup({
+    environmentHost: (id) => id === "eC" ? "child-host" : "root-host",
+    readPr: (u) => ({ ok: true, pr: status(Number(u.split("/").pop()), state) }),
+    onAction: () => { state = "draft"; return { ok: true, message: "marked as draft" }; },
+  });
+  rows.eC = builtinRow(12, "open", "2026-11-17T10:00:00Z");
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  await list(harness);
+  const before = harness.inspection.experimental_rpcInvalidations.length;
+  const result = await harness.behavior.callRpc("markDraft", { threadId: "R", url: url(12) });
+  assert.deepEqual(result, { ok: true, message: "marked as draft" });
+  assert.deepEqual(hostCalls.filter((call) => call.method === "markDraft"), [
+    { method: "markDraft", input: { url: url(12) }, hostId: "child-host" },
+  ]);
+  assert.ok(rpcCalls.some((call) => call.pluginId === "bb--github-pr-status" &&
+    call.method === "refresh" && call.input.environmentId === "eC"));
+  assert.deepEqual(hostCalls.at(-1), { method: "fetchPullRequests", input: { urls: [url(12)] }, hostId: "child-host" });
+  assert.ok(harness.inspection.experimental_rpcInvalidations.slice(before).some((tags) => tags.includes("thread-prs")));
+  assert.equal((await list(harness)).items.find((item) => item.number === 12).status.state, "draft");
+});
+
+test("draft CLI validates input and membership, and marks a listed open linked PR without a branch refresh", async (t) => {
+  const { bb, harness, hostCalls, rpcCalls } = setup();
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  for (const args of [[], ["https://example.com/pull/13", "R"], [url(13), "R", "extra"]]) {
+    assert.equal((await harness.behavior.runCli(["draft", ...args])).exitCode, 1);
+  }
+  const unlisted = await harness.behavior.runCli(["draft", url(500), "R"]);
+  assert.equal(unlisted.exitCode, 1);
+  assert.match(unlisted.stderr, /not listed/);
+  assert.equal(hostCalls.length, 0);
+  await list(harness);
+  const result = await harness.behavior.runCli(["draft", url(13), "R"]);
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stdout, "marked as draft");
+  assert.deepEqual(hostCalls.filter((call) => call.method === "markDraft").map((call) => call.input), [{ url: url(13) }]);
+  assert.ok(!rpcCalls.some((call) => call.method === "refresh"));
+});
+
+for (const throws of [false, true]) {
+  test(`mark draft reports host failures without refreshing (throws=${throws})`, async (t) => {
+    const { bb, harness, hostCalls, rpcCalls } = setup({ onAction: () => {
+      if (throws) throw new Error("gh unavailable");
+      return { ok: false, message: "gh unavailable" };
+    } });
+    t.after(() => harness.lifecycle.dispose());
+    await plugin(bb);
+    await list(harness);
+    const before = hostCalls.length;
+    const result = await harness.behavior.callRpc("markDraft", { threadId: "R", url: url(10) });
+    assert.deepEqual(result, { ok: false, message: "gh unavailable" });
+    assert.equal(hostCalls.length, before + 1);
+    assert.ok(!rpcCalls.some((call) => call.method === "refresh"));
+  });
+}
 
 test("a changed bb row invalidates views while the gh cache is fresh", async (t) => {
   const { bb, harness, hostCalls, rows } = setup();

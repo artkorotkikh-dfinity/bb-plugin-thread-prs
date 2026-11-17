@@ -389,6 +389,13 @@ export default experimental_defineHostEntry({
         ? { ok: true, message: firstLine(out.stdout || out.stderr || "Marked ready") }
         : { ok: false, message: firstLine(out.stderr || out.stdout) };
     },
+    markDraft: async ({ url }, context) => {
+      if (!parsePrUrl(url)) return { ok: false, message: "Not a github.com pull request URL" };
+      const out = await runGh(["pr", "ready", "--undo", url], context.signal);
+      return out.code === 0
+        ? { ok: true, message: firstLine(out.stdout || out.stderr || "Marked as draft") }
+        : { ok: false, message: firstLine(out.stderr || out.stdout) };
+    },
     rerunFailedCi: ({ url, expectedHead }, context) => writeAction(url, () => rerunFailedCi(url, expectedHead, context.signal)),
     requestCopilotReview: ({ url }, context) => writeAction(url, async () => {
       const pr = await readActionPr(url, context.signal);

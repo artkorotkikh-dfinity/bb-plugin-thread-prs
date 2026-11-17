@@ -171,6 +171,12 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),
   },
+  markDraft: {
+    experimental_description:
+      "Mark one open pull request listed for a thread as draft (gh pr ready --undo).",
+    input: threadPrInputSchema,
+    output: actionResultSchema,
+  },
   setAutoFix: {
     input: z.object({ threadId: z.string().min(1), url: z.string().url(), enabled: z.boolean() }).strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),
@@ -210,6 +216,10 @@ export const hostContract = defineRpcContract({
   markReady: {
     input: z.object({ url: z.string().url() }).strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),
+  },
+  markDraft: {
+    input: z.object({ url: z.string().url() }).strict(),
+    output: actionResultSchema,
   },
   rerunFailedCi: {
     input: z.object({ url: z.string().url(), expectedHead: commitOidSchema }).strict(),

@@ -189,6 +189,10 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean", label: "PR menu: Copilot review",
       description: "Show Copilot review. Requests require account eligibility and use Copilot quota.", default: true,
     },
+    showMarkDraftAction: {
+      type: "boolean", label: "PR menu: Mark as draft",
+      description: "Show Mark as draft for open pull requests. Drafts can be marked ready again.", default: true,
+    },
     showMergeAction: {
       type: "boolean", label: "PR menu: Merge",
       description: "Show Merge. Every merge still requires a fresh confirmation and GitHub readiness checks.", default: true,
@@ -796,6 +800,25 @@ export default async function plugin(bb: BbPluginApi) {
     return result;
   }
 
+  async function markDraft(threadId: string, url: string): Promise<{ ok: boolean; message: string }> {
+    const collected = await collect(threadId);
+    const ref = collected.refs.find((candidate) => candidate.url === url);
+    const item = assemble(threadId, collected).items.find((candidate) => candidate.url === url);
+    if (ref === undefined || item === undefined) {
+      return { ok: false, message: "That pull request is not listed for this thread." };
+    }
+    if (item.status?.state !== "open") {
+      return { ok: false, message: `#${item.number} must be open to mark as draft (current state: ${item.status?.state ?? "unknown"}).` };
+    }
+    if (ref.hostId === null) return { ok: false, message: "No machine to run gh on." };
+    const result = await host
+      .call("markDraft", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
+      .catch((error: unknown) => ({ ok: false, message: errorText(error) }));
+    if (!result.ok) return result;
+    await refreshAfterAction(threadId, ref);
+    return result;
+  }
+
   bb.rpc.register(
     rpcContract,
     {
@@ -808,6 +831,7 @@ export default async function plugin(bb: BbPluginApi) {
         return assemble(threadId, collected);
       },
       markReady: ({ threadId, url }) => markReady(threadId, url),
+      markDraft: ({ threadId, url }) => markDraft(threadId, url),
       setAutoFix: ({ threadId, url, enabled }) => setAutoFix(threadId, url, enabled),
       rerunFailedCi: (input, context) => quickAction("rerunFailedCi", input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
       requestCopilotReview: (input, context) => quickAction("requestCopilotReview", input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
@@ -833,6 +857,7 @@ export default async function plugin(bb: BbPluginApi) {
     "Usage:",
     "  bb thread-prs list [thread-id] [--json]   PRs of a thread and its descendants (default: this thread)",
     "  bb thread-prs ready <pr-url> [thread-id]  Mark one listed draft PR ready for review",
+    "  bb thread-prs draft <pr-url> [thread-id]  Mark one listed open PR as draft",
     "  bb thread-prs autofix <pr-url> on|off [thread-id]  Toggle Auto-fix for one listed PR",
   ].join("\n");
 
@@ -874,6 +899,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "list", summary: "List a thread's PRs with status", usage: "bb thread-prs list [thread-id] [--json]" },
       { name: "autofix", summary: "Toggle Auto-fix for one listed PR", usage: "bb thread-prs autofix <pr-url> on|off [thread-id]" },
       { name: "ready", summary: "Mark one listed draft PR ready", usage: "bb thread-prs ready <pr-url> [thread-id]" },
+      { name: "draft", summary: "Mark one listed open PR as draft", usage: "bb thread-prs draft <pr-url> [thread-id]" },
     ],
     async run(argv, ctx) {
       const json = argv.includes("--json");
@@ -910,11 +936,12 @@ export default async function plugin(bb: BbPluginApi) {
           const result = await setAutoFix(threadId, parsed.url, args[1] === "on");
           return result.ok ? { exitCode: 0, stdout: result.message } : { exitCode: 1, stderr: result.message };
         }
-        case "ready": {
+        case "ready":
+        case "draft": {
           const parsed = args[0] ? parsePrUrl(args[0]) : null;
           const threadId = args[1] ?? ctx.threadId;
           if (parsed === null || !threadId || args.length > 2) return { exitCode: 1, stderr: usage };
-          const result = await markReady(threadId, parsed.url);
+          const result = await (command === "ready" ? markReady : markDraft)(threadId, parsed.url);
           return result.ok
             ? { exitCode: 0, stdout: result.message }
             : { exitCode: 1, stderr: result.message };
