@@ -52,6 +52,7 @@
   "description": "Show every GitHub pull request a bb thread and its child threads made, with live status.",
   "scripts": {
     "build": "bb plugin build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bb plugin build . && node --test test/server.test.mjs"
   }
 }

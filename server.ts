@@ -238,7 +238,7 @@ export default async function plugin(bb: BbPluginApi) {
           signal,
         })
         .catch((error: unknown) => {
-          bb.log.warn(`github-pr-status read failed: ${errorText(error)}`);
+          if (!signal?.aborted) bb.log.warn(`github-pr-status read failed: ${errorText(error)}`);
           return {} as z.infer<typeof builtinOutputSchema>;
         });
       for (const [environmentId, owner] of envOwners) {
@@ -449,7 +449,7 @@ export default async function plugin(bb: BbPluginApi) {
       `${item.repo}#${item.number}`,
       status?.state ?? "…",
       checks,
-      status ? `review ${status.review}` : "",
+      status && (status.state === "open" || status.state === "draft") ? `review ${status.review}` : "",
       `[${from}]`,
       status?.title ?? "",
     ]

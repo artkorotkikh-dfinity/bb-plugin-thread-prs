@@ -58,7 +58,7 @@ bb thread-prs ready <pr-url> [thread-id]    # mark one listed draft PR ready
 ```bash
 npm install --include=dev
 npm run typecheck
-bb plugin build .
+npm test             # builds, then runs test/server.test.mjs in the SDK's fake plugin host
 bb plugin dev .        # rebuild + reload on save
 ```
 

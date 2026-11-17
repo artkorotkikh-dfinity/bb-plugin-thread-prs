@@ -35,7 +35,7 @@ function runGh(args: string[], signal: AbortSignal): Promise<GhOutput> {
 const FIELDS = `number title url state isDraft updatedAt reviewDecision
   reviewRequests(first: 1) { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
-    nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } }
+    nodes { __typename ... on CheckRun { name status conclusion startedAt } ... on StatusContext { context state createdAt } }
   } } } } }`;
 
 const PASSED = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
@@ -55,10 +55,19 @@ function toStatus(node: Json): PrStatus | null {
     obj(obj(obj((obj(node.commits)?.nodes as unknown[] | undefined)?.[0])?.commit)?.statusCheckRollup)
       ?.contexts,
   );
-  const checks = { passed: 0, failed: 0, pending: 0, total: 0 };
+  // A re-run leaves the earlier run in the rollup: count each check name once, latest run wins,
+  // which is also how bb's PR segment counts, so both show the same numbers.
+  const latest = new Map<string, { at: string; ctx: Json }>();
   for (const raw of (contexts?.nodes as unknown[] | undefined) ?? []) {
     const ctx = obj(raw);
     if (ctx === null) continue;
+    const name = String(ctx.__typename === "CheckRun" ? ctx.name : ctx.context);
+    const at = String(ctx.startedAt ?? ctx.createdAt ?? "");
+    const seen = latest.get(name);
+    if (seen === undefined || at > seen.at) latest.set(name, { at, ctx });
+  }
+  const checks = { passed: 0, failed: 0, pending: 0, total: 0 };
+  for (const { ctx } of latest.values()) {
     checks.total += 1;
     if (ctx.__typename === "CheckRun") {
       if (ctx.status !== "COMPLETED") checks.pending += 1;
