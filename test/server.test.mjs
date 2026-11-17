@@ -9,7 +9,7 @@ import plugin from "../dist/server.js";
 
 test("the plugin imports only public SDK and declared host shims", () => {
   const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)), {
-    allow: [/^(react|clsx|tailwind-merge|@radix-ui\/react-tooltip)$/],
+    allow: [/^(react|clsx|tailwind-merge|sonner|@radix-ui\/react-tooltip|@radix-ui\/react-alert-dialog)$/],
   });
   assert.deepEqual(result.violations, []);
   assert.deepEqual(result.privateDependencies, []);
@@ -63,7 +63,7 @@ const LINKS = {
   ],
 };
 
-function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], readPr, environmentHost = () => "host-1" } = {}) {
+function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], readPr, environmentHost = () => "host-1", onAction, onRefresh } = {}) {
   const hostCalls = [];
   const rpcCalls = [];
   const sends = [];
@@ -90,7 +90,7 @@ function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], r
       plugins: {
         callRpc: async ({ pluginId, method, input }) => {
           rpcCalls.push({ pluginId, method, input });
-          if (method === "refresh") return { ok: true };
+          if (method === "refresh") return onRefresh ? onRefresh() : { ok: true };
           return Object.fromEntries(input.keys.map((key) => [key, rows[key] ?? { outcome: "absent" }]));
         },
       },
@@ -98,6 +98,7 @@ function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], r
     experimental_callHostRpc: async ({ method, input, hostId }) => {
       hostCalls.push({ method, input, hostId });
       if (method === "markReady") return { ok: true, message: "marked" };
+      if (method !== "fetchPullRequests" && onAction) return onAction({ method, input, hostId });
       const byNumber = {
         9: status(9, "closed"),
         10: status(10, "open", "2026-11-17T10:00:00Z"), // newer than bb's row: ours wins
@@ -160,6 +161,101 @@ test("collects links and branch PRs from the whole subtree, deduped and sorted",
   await list(harness);
   assert.equal(hostCalls.length, 1);
   await harness.lifecycle.dispose();
+});
+
+const ACTION_HEAD = "a".repeat(40), ACTION_BASE = "b".repeat(40);
+const previewFor = (n = 12) => ({
+  url:url(n), title:`PR ${n}`, repo:"o/r", number:n,
+  headRefName:"feature", headRefOid:ACTION_HEAD, baseRefName:"main", baseRefOid:ACTION_BASE,
+  methods:["squash"],
+});
+const actionReply = ({method,input}) => method === "prepareMerge"
+  ? {ok:true,preview:previewFor(Number(input.url.split("/").pop()))} : {ok:true,message:"done"};
+
+test("quick actions validate membership before making host calls", async(t) => {
+  const env=setup({onAction:actionReply}); t.after(()=>env.harness.lifecycle.dispose());await plugin(env.bb);
+  for(const method of ["requestCopilotReview","prepareMerge","rerunFailedCi"]) {
+    const input={threadId:"R",url:url(999),...(method==="rerunFailedCi"?{expectedHead:ACTION_HEAD}:{})};
+    assert.equal((await env.harness.behavior.callRpc(method,input)).ok,false);
+  }
+  assert.equal(env.hostCalls.length,0);
+});
+
+test("quick actions and confirmed merge run on the descendant owner's machine",async(t)=>{
+  const env=setup({environmentHost:id=>id==="eC"?"child-host":"root-host",onAction:actionReply});
+  t.after(()=>env.harness.lifecycle.dispose());await plugin(env.bb);
+  assert.equal((await env.harness.behavior.callRpc("requestCopilotReview",{threadId:"R",url:url(12)})).ok,true);
+  assert.equal((await env.harness.behavior.callRpc("rerunFailedCi",{threadId:"R",url:url(12),expectedHead:ACTION_HEAD})).ok,true);
+  const prepared=await env.harness.behavior.callRpc("prepareMerge",{threadId:"R",url:url(12)});
+  assert.equal(prepared.ok,true);
+  const result=await env.harness.behavior.callRpc("mergePullRequest",{token:prepared.confirmation.token,method:"squash"});
+  assert.equal(result.ok,true);
+  const actions=env.hostCalls.filter(c=>c.method!=="fetchPullRequests");
+  assert.ok(actions.every(c=>c.hostId==="child-host"));
+  const merge=actions.find(c=>c.method==="mergePullRequest");
+  assert.deepEqual(merge.input,{url:url(12),expectedHead:ACTION_HEAD,expectedBase:ACTION_BASE,baseRefName:"main",method:"squash"});
+});
+
+test("merge requires a one-use, unexpired server confirmation",async(t)=>{
+  let now=Date.now();t.mock.method(Date,"now",()=>now);
+  const env=setup({onAction:actionReply});t.after(()=>env.harness.lifecycle.dispose());await plugin(env.bb);
+  const unknown=await env.harness.behavior.callRpc("mergePullRequest",{token:"11111111-1111-4111-8111-111111111111",method:"squash"});
+  assert.equal(unknown.ok,false);assert.equal(env.hostCalls.length,0);
+  const prepared=await env.harness.behavior.callRpc("prepareMerge",{threadId:"R",url:url(12)});
+  assert.equal(env.hostCalls.filter(c=>c.method==="mergePullRequest").length,0,"opening confirmation is read-only");
+  const input={token:prepared.confirmation.token,method:"squash"};
+  assert.equal((await env.harness.behavior.callRpc("mergePullRequest",input)).ok,true);
+  assert.equal((await env.harness.behavior.callRpc("mergePullRequest",input)).ok,false);
+  const second=await env.harness.behavior.callRpc("prepareMerge",{threadId:"R",url:url(12)});
+  now+=120_001;
+  assert.equal((await env.harness.behavior.callRpc("mergePullRequest",{token:second.confirmation.token,method:"squash"})).ok,false);
+  assert.equal(env.hostCalls.filter(c=>c.method==="mergePullRequest").length,1);
+});
+
+test("merge rejects an unoffered method or changed owning machine",async(t)=>{
+  let hostId="host-1";
+  const env=setup({environmentHost:()=>hostId,onAction:actionReply});t.after(()=>env.harness.lifecycle.dispose());await plugin(env.bb);
+  const first=await env.harness.behavior.callRpc("prepareMerge",{threadId:"R",url:url(12)});
+  assert.equal((await env.harness.behavior.callRpc("mergePullRequest",{token:first.confirmation.token,method:"rebase"})).ok,false);
+  const second=await env.harness.behavior.callRpc("prepareMerge",{threadId:"R",url:url(12)});
+  hostId="other-host";
+  assert.equal((await env.harness.behavior.callRpc("mergePullRequest",{token:second.confirmation.token,method:"squash"})).ok,false);
+  assert.equal(env.hostCalls.filter(c=>c.method==="mergePullRequest").length,0);
+});
+
+test("merge confirmation cannot outlive the PR's list membership",async(t)=>{
+  const links={R:[{repo:"o/r",issue:42,kind:"pull"}]};
+  const env=setup({links,descendantIds:[],onAction:actionReply});t.after(()=>env.harness.lifecycle.dispose());await plugin(env.bb);
+  const prepared=await env.harness.behavior.callRpc("prepareMerge",{threadId:"R",url:url(42)});
+  links.R=[];
+  assert.equal((await env.harness.behavior.callRpc("mergePullRequest",{token:prepared.confirmation.token,method:"squash"})).ok,false);
+  assert.equal(env.hostCalls.filter(c=>c.method==="mergePullRequest").length,0);
+});
+
+test("concurrent actions for one PR are not dispatched twice",async(t)=>{
+  let release,entered;
+  const started=new Promise(resolve=>{entered=resolve;});
+  const pending=new Promise(resolve=>{release=resolve;});
+  const env=setup({onAction:async()=>{entered();await pending;return{ok:true,message:"done"};}});
+  t.after(()=>env.harness.lifecycle.dispose());await plugin(env.bb);
+  const first=env.harness.behavior.callRpc("requestCopilotReview",{threadId:"R",url:url(12)});
+  await started;
+  const second=await env.harness.behavior.callRpc("rerunFailedCi",{threadId:"R",url:url(12),expectedHead:ACTION_HEAD});
+  assert.equal(second.ok,false);assert.match(second.message,/already running/);
+  release();await first;
+  assert.equal(env.hostCalls.filter(c=>c.method==="requestCopilotReview"||c.method==="rerunFailedCi").length,1);
+});
+
+test("a confirmed write returns before a slow status refresh",async(t)=>{
+  let release;
+  const pending=new Promise(resolve=>{release=resolve;});
+  const env=setup({onAction:actionReply,onRefresh:()=>pending});
+  t.after(async()=>{release({ok:true});await env.harness.lifecycle.dispose();});await plugin(env.bb);
+  const result=await Promise.race([
+    env.harness.behavior.callRpc("requestCopilotReview",{threadId:"R",url:url(12)}),
+    new Promise((_,reject)=>{const timer=setTimeout(()=>reject(new Error("Write response waited for status refresh")),1000);timer.unref();}),
+  ]);
+  assert.equal(result.ok,true);
 });
 
 test("mark ready: only listed drafts, and bb's PR segment is refreshed for branch PRs", async () => {

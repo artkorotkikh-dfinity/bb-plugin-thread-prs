@@ -18,6 +18,7 @@ import {
 import { rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
 import { cn } from "./lib/utils";
 import { Tooltip } from "./lib/tooltip";
+import { PrQuickActions } from "./lib/pr-actions";
 
 // Same tokens and icons as bb's GitHub PR Status plugin, so both segments read as siblings.
 const STATE = {
@@ -215,11 +216,13 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
 }
 
 function PrActions({ threadId, item }: { threadId: string; item: ThreadPr }) {
-  if (item.status?.state !== "open" && item.status?.state !== "draft") return null;
+  const open = useOpenUrl();
+  const active = item.status?.state === "open" || item.status?.state === "draft";
   return (
-    <span className="flex shrink-0 items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-      {item.status.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
-      <AutoFixButton threadId={threadId} item={item} />
+    <span className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-0.5" onClick={(event) => event.stopPropagation()}>
+      {item.status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
+      {active ? <AutoFixButton threadId={threadId} item={item} /> : null}
+      <PrQuickActions threadId={threadId} item={item} onOpenDiff={open(`${item.url}/files`)} />
     </span>
   );
 }
@@ -317,13 +320,13 @@ function PrRow({ threadId, item, ownBranchKey, mixedRepos }: {
   const title = status?.title ?? `${item.repo}#${item.number}`;
   const done = status?.state === "merged" || status?.state === "closed";
   return (
-    <li className={cn("flex items-start gap-2 rounded px-1.5 py-1 text-xs hover:bg-state-hover", done && "opacity-70")}>
+    <li className={cn("flex flex-wrap items-start gap-x-2 gap-y-0.5 rounded px-1.5 py-1 text-xs hover:bg-state-hover", done && "opacity-70")}>
       <Icon
         name={state?.icon ?? "GitPullRequest"}
         className={cn("mt-px size-3.5 shrink-0", state?.text ?? "text-muted-foreground")}
         aria-label={state?.label ?? "Pull request"}
       />
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <span className="flex min-w-0 flex-1 basis-60 flex-col gap-0.5">
         <a
           href={item.url}
           target="_blank"

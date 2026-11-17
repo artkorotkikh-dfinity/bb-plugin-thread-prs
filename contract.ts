@@ -112,6 +112,27 @@ export function truncationText(data: ThreadPrs): string | null {
 
 export const THREAD_PRS_TAG = "thread-prs";
 
+export const actionResultSchema = z.object({ ok: z.boolean(), message: z.string() });
+export const commitOidSchema = z.string().regex(/^[a-f0-9]{40}$/i);
+export const mergeMethodSchema = z.enum(["squash", "merge", "rebase"]);
+export type MergeMethod = z.infer<typeof mergeMethodSchema>;
+export const mergePreviewSchema = z.object({
+  url: z.string().url(), title: z.string(), repo: z.string(), number: z.number().int().positive(),
+  headRefName: z.string(), headRefOid: commitOidSchema,
+  baseRefName: z.string(), baseRefOid: commitOidSchema,
+  methods: z.array(mergeMethodSchema).min(1),
+});
+export type MergePreview = z.infer<typeof mergePreviewSchema>;
+const prepareMergeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), preview: mergePreviewSchema }),
+  z.object({ ok: z.literal(false), message: z.string() }),
+]);
+export const confirmedMergeSchema = z.object({
+  token: z.string().uuid(), expiresAt: z.number(), preview: mergePreviewSchema,
+});
+export type ConfirmedMerge = z.infer<typeof confirmedMergeSchema>;
+const threadPrInputSchema = z.object({ threadId: z.string().min(1), url: z.string().url() }).strict();
+
 export const rpcContract = defineRpcContract({
   threadPullRequests: {
     experimental_description:
@@ -135,6 +156,22 @@ export const rpcContract = defineRpcContract({
     input: z.object({ threadId: z.string().min(1), url: z.string().url(), enabled: z.boolean() }).strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),
   },
+  rerunFailedCi: {
+    input: threadPrInputSchema.extend({ expectedHead: commitOidSchema }).strict(),
+    output: actionResultSchema,
+  },
+  requestCopilotReview: { input: threadPrInputSchema, output: actionResultSchema },
+  prepareMerge: {
+    input: threadPrInputSchema,
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), confirmation: confirmedMergeSchema }),
+      z.object({ ok: z.literal(false), message: z.string() }),
+    ]),
+  },
+  mergePullRequest: {
+    input: z.object({ token: z.string().uuid(), method: mergeMethodSchema }).strict(),
+    output: actionResultSchema,
+  },
 });
 
 const ghReadSchema = z.discriminatedUnion("ok", [
@@ -154,5 +191,23 @@ export const hostContract = defineRpcContract({
   markReady: {
     input: z.object({ url: z.string().url() }).strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),
+  },
+  rerunFailedCi: {
+    input: z.object({ url: z.string().url(), expectedHead: commitOidSchema }).strict(),
+    output: actionResultSchema,
+  },
+  requestCopilotReview: {
+    input: z.object({ url: z.string().url() }).strict(), output: actionResultSchema,
+  },
+  prepareMerge: {
+    experimental_retryable: true,
+    input: z.object({ url: z.string().url() }).strict(), output: prepareMergeResultSchema,
+  },
+  mergePullRequest: {
+    input: z.object({
+      url: z.string().url(), expectedHead: commitOidSchema, expectedBase: commitOidSchema,
+      baseRefName: z.string().min(1), method: mergeMethodSchema,
+    }).strict(),
+    output: actionResultSchema,
   },
 });

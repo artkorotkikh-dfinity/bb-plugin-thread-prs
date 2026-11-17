@@ -7,6 +7,7 @@
 // cached here with state-dependent TTLs. Watchers refresh visible lists; a
 // background service also refreshes PRs explicitly enabled for Auto-fix.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   autoFixLabel,
@@ -22,6 +23,8 @@ import {
   type PrStatus,
   type ThreadPr,
   type ThreadPrs,
+  type MergePreview,
+  type MergeMethod,
 } from "./contract";
 
 const FOCUS_BOARD = "focus-board";
@@ -184,6 +187,10 @@ export default async function plugin(bb: BbPluginApi) {
   const hostReads = new Map<string | null, Promise<unknown>>();
   const autoFix = new Map<string, SavedAutoFix>();
   const autoFixActivity = new Map<string, string>();
+  const prActionsInFlight = new Set<string>();
+  const mergeConfirmations = new Map<string, {
+    threadId: string; url: string; hostId: string; preview: MergePreview; expiresAt: number;
+  }>();
   let autoFixWake = new AbortController();
   function requestAutoFixPoll() { autoFixWake.abort(); }
   async function waitForAutoFix(ms: number, signal: AbortSignal) {
@@ -641,6 +648,89 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  async function refreshAfterAction(threadId: string, ref: Ref) {
+    cache.delete(cacheKey(ref.hostId, ref.url));
+    bb.rpc.experimental_invalidate([THREAD_PRS_TAG]);
+    const signal = AbortSignal.any([lifecycle.signal, AbortSignal.timeout(30 * SECOND)]);
+    await Promise.all([
+      ref.environmentId !== null ? bb.sdk.plugins.callRpc({
+        pluginId: PR_STATUS_PLUGIN, method: "refresh", input: { environmentId: ref.environmentId }, outputSchema: z.unknown(),
+        signal,
+      }).catch(() => undefined) : Promise.resolve(),
+      refresh(threadId, signal).catch(() => undefined),
+    ]);
+    bb.rpc.experimental_invalidate([THREAD_PRS_TAG]);
+  }
+
+  async function actionTarget(threadId: string, url: string, signal: AbortSignal) {
+    const parsed = parsePrUrl(url);
+    if (!parsed) throw new Error("Not a github.com pull request URL.");
+    const collected = await collect(threadId, signal);
+    const ref = collected.refs.find((ref) => ref.url === parsed.url);
+    if (!ref) throw new Error("That pull request is not listed for this thread.");
+    if (!ref.hostId) throw new Error("The PR owner's machine is unavailable.");
+    return { ref, hostId: ref.hostId };
+  }
+
+  async function withPrAction(key: string, work: () => Promise<{ok:boolean;message:string}>) {
+    if (prActionsInFlight.has(key)) return { ok: false, message: "Another action is already running for this PR." };
+    prActionsInFlight.add(key);
+    try { return await work(); }
+    catch (error) { return { ok: false, message: errorText(error).slice(0,1000) }; }
+    finally { prActionsInFlight.delete(key); }
+  }
+
+  async function quickAction(method: "rerunFailedCi" | "requestCopilotReview", input: {threadId:string;url:string;expectedHead?:string}, signal: AbortSignal) {
+    try {
+      const { ref, hostId } = await actionTarget(input.threadId, input.url, signal);
+      return await withPrAction(ref.key, async () => {
+        const options = { hostId, signal, timeoutMs: 120 * SECOND };
+        const result = method === "rerunFailedCi" && input.expectedHead
+          ? await host.call("rerunFailedCi", { url: ref.url, expectedHead: input.expectedHead }, options)
+          : method === "requestCopilotReview"
+            ? await host.call("requestCopilotReview", { url: ref.url }, options)
+            : { ok: false, message: "Refresh the PR's commit before retrying CI." };
+        // A slow status reader must not hide a confirmed write behind a timeout.
+        void refreshAfterAction(input.threadId, ref).catch(() => undefined);
+        return result;
+      });
+    } catch (error) { return { ok: false, message: errorText(error).slice(0,1000) }; }
+  }
+
+  async function prepareMerge(threadId: string, url: string, signal: AbortSignal) {
+    try {
+      const { ref, hostId } = await actionTarget(threadId, url, signal);
+      const result = await host.call("prepareMerge", { url: ref.url }, { hostId, signal, timeoutMs: 30 * SECOND });
+      if (!result.ok) return result;
+      const now = Date.now();
+      for (const [key, entry] of mergeConfirmations) if (entry.expiresAt <= now) mergeConfirmations.delete(key);
+      if (mergeConfirmations.size >= 100) mergeConfirmations.delete(mergeConfirmations.keys().next().value!);
+      const token = randomUUID();
+      const expiresAt = now + 2 * 60 * SECOND;
+      mergeConfirmations.set(token, { threadId, url: ref.url, hostId, preview: result.preview, expiresAt });
+      return { ok: true as const, confirmation: { token, expiresAt, preview: result.preview } };
+    } catch (error) { return { ok: false as const, message: errorText(error).slice(0,1000) }; }
+  }
+
+  async function mergePullRequest(token: string, method: MergeMethod, signal: AbortSignal) {
+    const entry = mergeConfirmations.get(token);
+    mergeConfirmations.delete(token); // One use, including an ambiguously delivered write.
+    if (!entry || entry.expiresAt <= Date.now()) return { ok: false, message: "This merge confirmation expired. Open a new confirmation." };
+    if (!entry.preview.methods.includes(method)) return { ok: false, message: "That merge method was not offered for this PR." };
+    try {
+      const { ref, hostId } = await actionTarget(entry.threadId, entry.url, signal);
+      if (hostId !== entry.hostId) return { ok: false, message: "The PR's machine changed. Open a new merge confirmation." };
+      return await withPrAction(ref.key, async () => {
+        const result = await host.call("mergePullRequest", {
+          url: ref.url, expectedHead: entry.preview.headRefOid, expectedBase: entry.preview.baseRefOid,
+          baseRefName: entry.preview.baseRefName, method,
+        }, { hostId, signal, timeoutMs: 30 * SECOND });
+        void refreshAfterAction(entry.threadId, ref).catch(() => undefined);
+        return result;
+      });
+    } catch (error) { return { ok: false, message: errorText(error).slice(0,1000) }; }
+  }
+
   async function markReady(threadId: string, url: string): Promise<{ ok: boolean; message: string }> {
     const collected = await collect(threadId);
     const ref = collected.refs.find((candidate) => candidate.url === url);
@@ -654,20 +744,7 @@ export default async function plugin(bb: BbPluginApi) {
       .call("markReady", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
       .catch((error: unknown) => ({ ok: false, message: errorText(error) }));
     if (!result.ok) return result;
-    cache.delete(cacheKey(ref.hostId, url));
-    // bb's own PR segment shows the same PR when it is an environment's branch PR: let it catch up too.
-    if (ref.environmentId !== null) {
-      await bb.sdk.plugins
-        .callRpc({
-          pluginId: PR_STATUS_PLUGIN,
-          method: "refresh",
-          input: { environmentId: ref.environmentId },
-          outputSchema: z.unknown(),
-        })
-        .catch(() => undefined);
-    }
-    await refresh(threadId).catch(() => undefined);
-    bb.rpc.experimental_invalidate([`${THREAD_PRS_TAG}:${threadId}`]);
+    await refreshAfterAction(threadId, ref);
     return result;
   }
 
@@ -684,6 +761,10 @@ export default async function plugin(bb: BbPluginApi) {
       },
       markReady: ({ threadId, url }) => markReady(threadId, url),
       setAutoFix: ({ threadId, url, enabled }) => setAutoFix(threadId, url, enabled),
+      rerunFailedCi: (input, context) => quickAction("rerunFailedCi", input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
+      requestCopilotReview: (input, context) => quickAction("requestCopilotReview", input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
+      prepareMerge: ({ threadId, url }, context) => prepareMerge(threadId, url, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
+      mergePullRequest: ({ token, method }, context) => mergePullRequest(token, method, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
     },
     { experimental_discoverable: true },
   );

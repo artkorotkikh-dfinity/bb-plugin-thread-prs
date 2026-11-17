@@ -36,3 +36,11 @@ to merge, close or force-push. See [Auto-fix guardrails](../../README.md#auto-fi
 A PR shows up only if it is linked or is an environment's branch PR. When you open or
 push to a PR from another branch, link it so it appears:
 `bb focus-board link set "$BB_THREAD_ID" <pr-url>`.
+
+The row also offers View diff, Re-run failed CI, Copilot review and Merge. These are
+manual UI actions, not additional CLI commands. CI retries only failed GitHub Actions
+jobs on the current head and can use runner minutes. Copilot review uses the active
+GitHub account's permissions and Copilot quota. Merge opens a two-minute, one-use
+confirmation for the exact head and target; it keeps branches and does not bypass
+rules or enqueue a required merge queue. Do not invoke a mutation just to test a
+button. An ambiguous write is never automatically retried: check GitHub first.

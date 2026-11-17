@@ -13,7 +13,7 @@ PR of the environment's current branch.
 - BB 0.49.0 or newer with Plugin SDK 0.6.132–0.6.x. The plugin uses experimental
   SDK surfaces and should be checked against a new SDK minor version before upgrading.
 - The [GitHub CLI](https://cli.github.com/) installed and signed in on each machine
-  that owns a thread's environment. Reads and **Mark ready** use that machine's
+  that owns a thread's environment. Reads and PR actions use that machine's
   current `gh` account. GitHub Enterprise Server is not supported.
 - BB's bundled GitHub PR Status plugin supplies branch PRs. The separately installed
   [Focus Board](https://github.com/cristoslc/bb-plugin-focus-board) plugin supplies
@@ -44,6 +44,35 @@ newest number first inside each.
 Each row: state, `#number`, title, checks, review, where it came from ("This branch" or the
 child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
 (`gh pr ready`). Open and draft rows also have an **Auto-fix** toggle beside it.
+
+## Quick actions
+
+Four icon buttons sit at the end of each active PR row, in the composer list and
+context card. Hover or focus a button for its label or the reason it is unavailable.
+The toolbar wraps below the title when space is limited.
+
+- **View diff** opens the PR's changed files, following the link-opening setting.
+  This action remains available on completed PRs.
+- **Re-run failed CI** retries failed jobs in the latest failed GitHub Actions run
+  for each workflow/event on the displayed head commit. It checks the PR head and
+  each run again before submitting. Successful workflows and checks from external
+  CI providers are not rerun. GitHub's rerun age/attempt limits apply; this can use
+  runner minutes. At most 10 failed workflows are submitted per click.
+- **Copilot review** requests a new review through GitHub's Copilot code-review API,
+  preserving human reviewers. It requires Copilot eligibility, quota and pull-request
+  write permission; an existing pending request is reported without another retry.
+- **Merge** first reads fresh GitHub state, then shows a confirmation with the PR,
+  source/target branches, exact commit and repository-supported merge methods. The
+  confirmation expires after two minutes and can be used once. Submission checks
+  the head, target, reviews, checks, permission and merge readiness again; the merge
+  request also pins the head SHA. The branch is kept.
+
+These actions run only on explicit clicks. Writes are not automatically retried
+after failures or timeouts; inspect GitHub before trying an ambiguous result again.
+Only PRs currently listed for the thread can be acted on, using their owning machine.
+Merge requires complete passing CI data (at most 100 contexts) and GitHub's clean
+merge state. It does not enable auto-merge, enqueue a required merge queue, bypass
+repository rules or delete branches; use GitHub for those flows.
 
 ## Auto-fix
 
@@ -180,7 +209,7 @@ bb plugin dev .        # rebuild + reload on save
 3.2.4 tarball when this was scaffolded.
 
 The test suite uses fake BB threads and a private `gh` executable fixture. It never
-marks a real PR ready or sends work to a real agent. Builds from Git omit development
+changes a real PR, retries a real workflow or sends work to a real agent. Builds from Git omit development
 dependencies, so the SDK used by the host entry is a runtime dependency.
 
 ## Data and limitations
