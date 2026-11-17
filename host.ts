@@ -36,8 +36,7 @@ const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefO
   author { login }
   reviewThreads(first: 50) { pageInfo { hasNextPage endCursor } nodes {
     id isResolved isOutdated path line startLine
-    firstComment: comments(first: 1) { nodes { id author { login } body url } }
-    lastComment: comments(last: 1) { nodes { id author { login } } }
+    lastComment: comments(last: 1) { nodes { id author { login } body url } }
   } }
   reviews(last: 1, states: [CHANGES_REQUESTED]) { nodes { id author { login } comments { totalCount } } }
   reviewRequests(first: 1) { totalCount }
@@ -210,16 +209,11 @@ function toStatus(node: Json): PrStatus | null {
     unresolvedReviewThreadCount: completeThreadCount(node.reviewThreads),
     reviewThreads: ((obj(node.reviewThreads)?.nodes as unknown[] | undefined) ?? []).flatMap((raw) => {
       const thread = obj(raw);
-      const first = obj((obj(thread?.firstComment)?.nodes as unknown[] | undefined)?.[0]);
       const last = obj((obj(thread?.lastComment)?.nodes as unknown[] | undefined)?.[0]);
-      const login = (comment: Json | null) => {
-        const value = obj(comment?.author)?.login;
-        return typeof value === "string" ? value : null;
-      };
+      const login = obj(last?.author)?.login;
       const parsed = reviewThreadSchema.safeParse({
         ...thread,
-        firstComment: { ...first, author: login(first) },
-        lastComment: { ...last, author: login(last) },
+        lastComment: { ...last, author: typeof login === "string" ? login : null },
       });
       return parsed.success ? [parsed.data] : [];
     }),

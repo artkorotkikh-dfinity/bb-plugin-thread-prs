@@ -23,8 +23,7 @@ export const reviewThreadSchema = z.object({
   path: z.string(),
   line: z.number().int().nullable(),
   startLine: z.number().int().nullable(),
-  firstComment: z.object({ id: z.string(), author: z.string().nullable(), body: z.string(), url: z.string() }),
-  lastComment: z.object({ id: z.string(), author: z.string().nullable() }),
+  lastComment: z.object({ id: z.string(), author: z.string().nullable(), body: z.string(), url: z.string() }),
 });
 
 export const prStatusSchema = z.object({

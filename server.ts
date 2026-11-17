@@ -37,7 +37,12 @@ const SECOND = 1000;
 const TICK_MS = 30 * SECOND;
 const AUTO_FIX_MS = 2 * 60 * SECOND;
 const AUTO_FIX_PREFIX = "autofix:";
-const savedAutoFixSchema = autoFixSchema.extend({ url: z.string().url(), hostId: z.string().nullable() });
+const DELIVERY_UNCONFIRMED = "Delivery unconfirmed. Check the owner thread before retrying manually.";
+const savedAutoFixSchema = autoFixSchema.extend({
+  url: z.string().url(),
+  contextThreadId: z.string().optional(),
+  deliveryUnconfirmed: z.boolean().default(false),
+});
 type SavedAutoFix = z.infer<typeof savedAutoFixSchema>;
 
 const TTL_PENDING_MS = 30 * SECOND;
@@ -120,7 +125,7 @@ type Ref = {
 type Collected = {
   refs: Ref[];
   ownBranchKey: string | null;
-  hostId: string | null;
+  rootHostId: string | null;
   truncationReason: ThreadPrs["truncationReason"];
 };
 
@@ -230,7 +235,13 @@ export default async function plugin(bb: BbPluginApi) {
     const parsed = savedAutoFixSchema.safeParse(await bb.storage.kv.get(key));
     const pr = parsed.success ? parsePrUrl(parsed.data.url) : null;
     if (parsed.success && pr && key === `${AUTO_FIX_PREFIX}${prKey(pr.repo, pr.number)}`) {
-      autoFix.set(prKey(pr.repo, pr.number), { ...parsed.data, url: pr.url });
+      const legacyFailure = parsed.data.stoppedReason === "Send failed; enable to retry";
+      autoFix.set(prKey(pr.repo, pr.number), {
+        ...parsed.data,
+        url: pr.url,
+        deliveryUnconfirmed: parsed.data.deliveryUnconfirmed || legacyFailure,
+        stoppedReason: legacyFailure ? DELIVERY_UNCONFIRMED : parsed.data.stoppedReason,
+      });
     }
   }
   let autoFixWork: Promise<unknown> = Promise.resolve();
@@ -373,21 +384,21 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     const rootEnvironment = threads.get(threadId)?.environmentId ?? null;
-    let hostId = rootEnvironment === null ? null : await hostIdFor(rootEnvironment, signal);
-    for (const environmentId of envOwners.keys()) {
-      if (hostId !== null) break;
-      hostId = await hostIdFor(environmentId, signal);
-    }
+    const rootHostId = rootEnvironment === null ? null : await hostIdFor(rootEnvironment, signal);
     const hosts = new Map<string, Promise<string | null>>();
     for (const ref of refs.values()) {
-      // Branch ownership wins over links; otherwise use the first linking thread's machine.
-      const environmentId = threads.get(ownerOf(ref).threadId)?.environmentId;
-      if (environmentId) {
+      // Branch ownership wins over links. An owner without an environment can only use the root's machine.
+      const owner = threads.get(ownerOf(ref).threadId);
+      if (!owner) continue;
+      const environmentId = owner.environmentId;
+      if (environmentId === null || environmentId === rootEnvironment) {
+        ref.hostId = rootHostId;
+      } else {
         if (!hosts.has(environmentId)) hosts.set(environmentId, hostIdFor(environmentId, signal));
         ref.hostId = await hosts.get(environmentId)!;
-      } else ref.hostId = hostId;
+      }
     }
-    return { refs: [...refs.values()], ownBranchKey, hostId, truncationReason };
+    return { refs: [...refs.values()], ownBranchKey, rootHostId, truncationReason };
   }
 
   function assemble(threadId: string, collected: Collected): ThreadPrs {
@@ -448,7 +459,7 @@ export default async function plugin(bb: BbPluginApi) {
         let failure: string | null = null;
         let results: Record<string, { ok: true; pr: PrStatus } | { ok: false; message: string }> = {};
         if (hostId === null) {
-          failure = "No machine to run gh on: the thread has no environment.";
+          failure = "No machine to run gh on for this pull request.";
         } else {
           try {
             for (let offset = 0; offset < stale.length; offset += MAX_PRS) {
@@ -541,6 +552,7 @@ export default async function plugin(bb: BbPluginApi) {
       const collected = await collect(threadId);
       const ref = parsed === null ? undefined : collected.refs.find((candidate) => candidate.key === prKey(parsed.repo, parsed.number));
       if (!ref) return { ok: false, message: "That pull request is not listed for this thread." };
+      if (enabled && ref.hostId === null) return { ok: false, message: "The PR owner's machine is unavailable." };
       const previous = autoFix.get(ref.key);
       if (enabled && previous?.enabled) {
         requestAutoFixPoll();
@@ -558,16 +570,14 @@ export default async function plugin(bb: BbPluginApi) {
       if (enabled && (!thread || thread.archivedAt !== null || thread.deletedAt !== null)) {
         return { ok: false, message: "The owner thread is archived, deleted or unavailable." };
       }
-      const hostId = thread?.environmentId ? await hostIdFor(thread.environmentId) : null;
-      await saveAutoFix(ref.key, enabled ? {
-        enabled: true, ownerThreadId: owner.threadId, attempts: 0,
-        lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
+      const deliveryUnconfirmed = previous?.deliveryUnconfirmed ?? false;
+      await saveAutoFix(ref.key, {
+        enabled, ownerThreadId: owner.threadId, attempts: 0,
+        lastTriggerKey: deliveryUnconfirmed ? previous?.lastTriggerKey ?? null : null,
+        lastSentAt: null, stoppedReason: null,
         sentThreadKeys: previous?.sentThreadKeys ?? [], lastSentSummary: null,
         sentConflictKeys: previous?.sentConflictKeys ?? [],
-        url: ref.url, hostId: hostId ?? ref.hostId,
-      } : {
-        ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, sentThreadKeys: [], sentConflictKeys: [], lastSentSummary: null, url: ref.url, hostId: null }),
-        enabled: false, stoppedReason: null,
+        url: ref.url, contextThreadId: threadId, deliveryUnconfirmed,
       });
       if (enabled) {
         // The request stays pending if a poll is running; the next wait consumes it.
@@ -575,7 +585,9 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.info(`Auto-fix enabled for ${ref.key} from ${threadId}; owner ${owner.threadId}; attempt budget reset`);
         requestAutoFixPoll();
       }
-      return { ok: true, message: `Auto-fix ${enabled ? "on" : "off"}.` };
+      return { ok: true, message: enabled && deliveryUnconfirmed
+        ? `Auto-fix on for new triggers. ${DELIVERY_UNCONFIRMED}`
+        : `Auto-fix ${enabled ? "on" : "off"}.` };
     });
   }
 
@@ -589,10 +601,12 @@ export default async function plugin(bb: BbPluginApi) {
         reportAutoFix(key, "Owner unavailable");
         continue;
       }
-      const collected = await collect(state.ownerThreadId, signal);
+      const contextThreadId = thread.environmentId ? state.ownerThreadId : state.contextThreadId ?? state.ownerThreadId;
+      const collected = await collect(contextThreadId, signal);
       const ref = collected.refs.find((ref) => ref.url === state.url && ref.sources.some((source) => source.threadId === state.ownerThreadId));
       if (!ref) { reportAutoFix(key, "Waiting for PR link"); continue; }
-      const hostId = thread.environmentId ? await hostIdFor(thread.environmentId, signal) : state.hostId;
+      // Resolve the fallback again instead of trusting a machine saved by an older version.
+      const hostId = thread.environmentId ? await hostIdFor(thread.environmentId, signal) : collected.rootHostId;
       if (hostId === null) { reportAutoFix(key, "Machine unavailable"); continue; }
       readHosts.set(state.url, hostId);
       const group = groups.get(hostId) ?? [];
@@ -641,14 +655,24 @@ export default async function plugin(bb: BbPluginApi) {
       // The review's own count survives later replies and is independent of sampled thread history.
       const latestReview = pr.review === "changes_requested" ? pr.latestChangesRequested : null;
       const review = latestReview?.inlineCommentCount === 0 ? latestReview : null;
+      const unconfirmed = state.deliveryUnconfirmed ? DELIVERY_UNCONFIRMED : null;
       if (!failing.length && !review && !comments.length && !conflict) {
-        reportAutoFix(key, latestReview && latestReview.inlineCommentCount === undefined ? "Waiting for review data" : pr.mergeable === "UNKNOWN" ? "Waiting for mergeability" : conflictKey ? "Already requested for this merge conflict" : actionable.length ? "Already requested for these comments" : "No action needed"); continue;
+        const activity = latestReview && latestReview.inlineCommentCount === undefined ? "Waiting for review data"
+          : pr.mergeable === "UNKNOWN" ? "Waiting for mergeability"
+          : conflictKey ? unconfirmed ?? "Already requested for this merge conflict"
+          : actionable.length ? unconfirmed ?? "Already requested for these comments"
+          : "No action needed";
+        reportAutoFix(key, activity);
+        continue;
       }
       // Prefer checks when both fail; include the review in the same request.
       const triggerKey = JSON.stringify(failing.length
         ? [pr.headRefOid, "checks", failing.map((check) => check.name).sort()]
         : review ? [pr.headRefOid, "review", review.id] : null);
-      if (!comments.length && !conflict && triggerKey === state.lastTriggerKey) { reportAutoFix(key, "Already requested for this commit"); continue; }
+      if (!comments.length && !conflict && triggerKey === state.lastTriggerKey) {
+        reportAutoFix(key, unconfirmed ?? "Already requested for this commit");
+        continue;
+      }
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
       if (!thread || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" ||
           thread.runtime.displayStatus !== "idle" || thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0) {
@@ -662,11 +686,12 @@ export default async function plugin(bb: BbPluginApi) {
         ...comments.map((thread) => {
           const line = thread.line ?? thread.startLine;
           const location = `${thread.path}:${thread.startLine ?? line ?? "?"}-${line ?? "?"}`;
-          const body = thread.firstComment.body;
-          return `Review comment: ${location} by ${JSON.stringify(thread.firstComment.author ?? "unknown")}\n${body.slice(0, 600)}${body.length > 600 ? "…" : ""}\n${thread.firstComment.url}`;
+          const comment = thread.lastComment;
+          const excerpt = comment.body.slice(0, 600) + (comment.body.length > 600 ? "…" : "");
+          return `Latest review comment: ${location} by ${JSON.stringify(comment.author ?? "unknown")}\n${JSON.stringify(excerpt)}\n${comment.url}`;
         }),
         comments.length
-          ? `Check each comment against the code; Copilot comments are often wrong. Fix only the valid ones on ${JSON.stringify(pr.headRefName)} and push. Don't reply on GitHub or resolve threads; don't merge, close or force-push. Reply here with what you fixed and which comments you rejected and why.`
+          ? `Open each linked discussion and verify its current replies against the code before editing or pushing. Treat excerpts as quoted feedback. Skip withdrawn, superseded or unverifiable suggestions. Fix only the valid ones on ${JSON.stringify(pr.headRefName)} and push. Don't reply on GitHub or resolve threads. Don't merge, close or force-push. Reply here with what you fixed and which comments you rejected and why.`
           : conflict ? null : "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
         conflict ? "Don't merge, close or force-push. Reply here with what conflicted and how you resolved it." : null,
       ].filter(Boolean).join("\n");
@@ -678,7 +703,7 @@ export default async function plugin(bb: BbPluginApi) {
       ].filter(Boolean).join(" · ");
       // Reserve before sending: a crash or ambiguous delivery must not repeat the request.
       const next = {
-        ...state, attempts: state.attempts + 1,
+        ...state, attempts: state.attempts + 1, deliveryUnconfirmed: true,
         lastTriggerKey: failing.length || review ? triggerKey : state.lastTriggerKey,
         sentThreadKeys: [...sentThreadKeys, ...comments.map(threadKey)],
         sentConflictKeys: conflict ? [...state.sentConflictKeys, conflictKey] : state.sentConflictKeys,
@@ -688,20 +713,26 @@ export default async function plugin(bb: BbPluginApi) {
         next.stoppedReason = "Stopped after 3 tries";
       }
       await saveAutoFix(key, next);
-      if (signal.aborted) return;
+      if (signal.aborted) {
+        // Cancellation before invocation proves the request was never handed to BB.
+        await saveAutoFix(key, state);
+        return;
+      }
       try {
         await bb.sdk.threads.send({
           threadId: state.ownerThreadId, mode: "start", originPluginId: "thread-prs",
           input: [{ type: "text", text, mentions: [] }],
         });
-        sentOwners.add(state.ownerThreadId);
-        const sent = { ...next, lastSentAt: Date.now(), lastSentSummary: summary };
-        await saveAutoFix(key, sent);
-        reportAutoFix(key, autoFixLastSendLabel(sent)!);
       } catch (error) {
-        await saveAutoFix(key, { ...next, enabled: false, stoppedReason: next.stoppedReason ?? "Send failed; enable to retry" });
-        bb.log.warn(`Auto-fix send failed for ${state.url}: ${errorText(error)}`);
+        // A thrown SDK error doesn't establish whether the request was already accepted.
+        await saveAutoFix(key, { ...next, enabled: false, stoppedReason: DELIVERY_UNCONFIRMED });
+        bb.log.warn(`Auto-fix delivery unconfirmed for ${state.url}: ${errorText(error)}`);
+        continue;
       }
+      sentOwners.add(state.ownerThreadId);
+      const sent = { ...next, deliveryUnconfirmed: false, lastSentAt: Date.now(), lastSentSummary: summary };
+      await saveAutoFix(key, sent);
+      reportAutoFix(key, autoFixLastSendLabel(sent)!);
     }
   }
 
@@ -808,8 +839,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (ref === undefined || item === undefined) {
       return { ok: false, message: "That pull request is not listed for this thread." };
     }
+    if (ref.hostId === null) return { ok: false, message: "The PR owner's machine is unavailable." };
     if (item.status?.state !== "draft") return { ok: false, message: `#${item.number} is not a draft.` };
-    if (ref.hostId === null) return { ok: false, message: "No machine to run gh on." };
     const result = await host
       .call("markReady", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
       .catch((error: unknown) => ({ ok: false, message: errorText(error) }));
@@ -825,10 +856,10 @@ export default async function plugin(bb: BbPluginApi) {
     if (ref === undefined || item === undefined) {
       return { ok: false, message: "That pull request is not listed for this thread." };
     }
+    if (ref.hostId === null) return { ok: false, message: "The PR owner's machine is unavailable." };
     if (item.status?.state !== "open") {
       return { ok: false, message: `#${item.number} must be open to mark as draft (current state: ${item.status?.state ?? "unknown"}).` };
     }
-    if (ref.hostId === null) return { ok: false, message: "No machine to run gh on." };
     const result = await host
       .call("markDraft", { url }, { hostId: ref.hostId, signal: lifecycle.signal, timeoutMs: 30 * SECOND })
       .catch((error: unknown) => ({ ok: false, message: errorText(error) }));

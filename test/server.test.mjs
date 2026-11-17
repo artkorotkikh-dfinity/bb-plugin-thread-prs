@@ -496,8 +496,7 @@ const failingStatus = (n = 10, head = "head-1") => ({
 const reviewThread = (change = {}) => ({
   id: "thread-1", isResolved: false, isOutdated: false,
   path: "docs/ai/writing.md", startLine: 164, line: 166,
-  firstComment: { id: "comment-1", author: "copilot-pull-request-reviewer", body: "Check this wording. " + "x".repeat(700), url: "https://github.com/o/r/pull/10#discussion_r1" },
-  lastComment: { id: "comment-1", author: "copilot-pull-request-reviewer" },
+  lastComment: { id: "comment-1", author: "copilot-pull-request-reviewer", body: "Check this wording. " + "x".repeat(700), url: "https://github.com/o/r/pull/10#discussion_r1" },
   ...change,
 });
 const commentedStatus = (change = {}) => ({
@@ -684,7 +683,7 @@ for (const comments of [false, true]) {
     assert.equal(env.sends.length, 1);
     assert.match(env.sends[0].input[0].text, /Merge conflict:/);
     assert.match(env.sends[0].input[0].text, /Failing check: "unit"/);
-    if (comments) assert.match(env.sends[0].input[0].text, /Review comment:/);
+    if (comments) assert.match(env.sends[0].input[0].text, /Latest review comment:/);
     else assert.match(env.sends[0].input[0].text, /Reviewer "alice" requested changes/);
     env.setPr({ ...pr, checks: { ...pr.checks, pending: 0 }, checksComplete: true });
     env.advance(); await tick(t, env.harness);
@@ -817,14 +816,14 @@ for (const history of [{ isResolved: true }, { isOutdated: true }, {}]) {
 test("inline replies belonging to the latest review retain thread dedupe", async (t) => {
   const env = autoFixSetup(t);
   const pr = commentedStatus({ review: "changes_requested", latestChangesRequested: { id: "reply-review", author: "alice", inlineCommentCount: 1 },
-    reviewThreads: [reviewThread({ lastComment: { id: "reply", author: "alice" } })] });
+    reviewThreads: [reviewThread({ lastComment: { ...reviewThread().lastComment, id: "reply", author: "alice" } })] });
   env.setPr(pr);
   await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
   assert.equal(env.sends.length, 1);
   assert.doesNotMatch(env.sends[0].input[0].text, /Reviewer .* requested changes/);
   env.setPr({ ...pr, headRefOid: "head-2" }); env.advance(); await tick(t, env.harness);
   assert.equal(env.sends.length, 1);
-  env.setPr({ ...pr, headRefOid: "head-2", reviewThreads: [reviewThread({ lastComment: { id: "author-reply", author: "pr-author" } })] });
+  env.setPr({ ...pr, headRefOid: "head-2", reviewThreads: [reviewThread({ lastComment: { ...reviewThread().lastComment, id: "author-reply", author: "pr-author" } })] });
   env.advance(); await tick(t, env.harness);
   assert.equal(env.sends.length, 1, "an author reply must not re-trigger the general review");
 });
@@ -850,7 +849,7 @@ for (const trigger of ["comment", "check", "review"]) {
     assert.equal(env.sends.length, 2);
     const message = env.sends[1].input[0].text;
     assert.doesNotMatch(message, /Merge conflict:|Merge the current base|what conflicted/);
-    assert.match(message, trigger === "comment" ? /Review comment:/ : trigger === "check" ? /Failing check:/ : /Reviewer "alice" requested changes/);
+    assert.match(message, trigger === "comment" ? /Latest review comment:/ : trigger === "check" ? /Failing check:/ : /Reviewer "alice" requested changes/);
     if (trigger === "review") assert.match(message, /Fix on that branch, push/);
     const state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
     assert.doesNotMatch(state.lastSentSummary, /merge conflict/);
@@ -868,9 +867,9 @@ test("Auto-fix handles COMMENTED reviews once per thread and last comment across
   assert.equal(env.sends.length, 1);
   const message = env.sends[0].input[0].text;
   for (const part of ["docs/ai/writing.md:164-166", "copilot-pull-request-reviewer",
-    reviewThread().firstComment.body.slice(0, 600) + "…", reviewThread().firstComment.url,
-    "Check each comment against the code; Copilot comments are often wrong.",
-    'Fix only the valid ones on "fix/pr-10" and push.', "Don't reply on GitHub or resolve threads; don't merge, close or force-push.",
+    reviewThread().lastComment.body.slice(0, 600) + "…", reviewThread().lastComment.url,
+    "Open each linked discussion and verify its current replies against the code before editing or pushing.",
+    'Fix only the valid ones on "fix/pr-10" and push.', "Don't reply on GitHub or resolve threads. Don't merge, close or force-push.",
     "Reply here with what you fixed and which comments you rejected and why."]) assert.ok(message.includes(part), part);
   assert.ok(!message.includes("x".repeat(601)), "body is bounded");
   let state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
@@ -891,14 +890,22 @@ test("Auto-fix handles COMMENTED reviews once per thread and last comment across
   assert.equal(env.sends.length, 1, "re-enable keeps thread keys");
   state = (await list(reloaded.harness)).items.find(item => item.number === 10).autoFix;
   assert.equal(state.attempts, 0);
-  env.setPr({ ...pr, reviewThreads: [reviewThread({ lastComment: { id: "comment-2", author: "human-reviewer" } })] });
+  const lastComment = {
+    id: "comment-2", author: "human-reviewer", body: "Keep the original wording. I withdraw the change.",
+    url: `${url(10)}#discussion_r2`,
+  };
+  env.setPr({ ...pr, reviewThreads: [reviewThread({ lastComment })] });
   env.advance(); await tick(t, reloaded.harness);
   assert.equal(env.sends.length, 2, "new reviewer comment can trigger again");
+  const followup = env.sends[1].input[0].text;
+  assert.ok(followup.includes(lastComment.body));
+  assert.ok(followup.includes(lastComment.url));
+  assert.doesNotMatch(followup, /Check this wording|discussion_r1/);
 });
 
 for (const change of [
   { isResolved: true }, { isOutdated: true },
-  { lastComment: { id: "reply-1", author: "PR-Author" } },
+  { lastComment: { ...reviewThread().lastComment, id: "reply-1", author: "PR-Author" } },
 ]) {
   test(`Auto-fix ignores non-actionable review threads: ${JSON.stringify(change)}`, async (t) => {
     const env = autoFixSetup(t);
@@ -926,7 +933,7 @@ for (const pending of [false, true]) {
     await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
     assert.equal(env.sends.length, 1);
     assert.match(env.sends[0].input[0].text, /Failing check: "unit"/);
-    assert.match(env.sends[0].input[0].text, /Review comment: docs\/ai\/writing.md:164-166/);
+    assert.match(env.sends[0].input[0].text, /Latest review comment: docs\/ai\/writing.md:164-166/);
     let state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
     assert.equal(state.attempts, 1);
     assert.equal(state.lastSentSummary, "2 failing checks · 1 review comment");
@@ -940,7 +947,7 @@ test("Auto-fix shares the three-attempt budget between checks and comments and s
   const env = autoFixSetup(t);
   await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
   env.setPr(commentedStatus()); env.advance(); await tick(t, env.harness);
-  const second = reviewThread({ id: "thread-2", firstComment: { ...reviewThread().firstComment, author: "alice" }, lastComment: { id: "comment-2", author: "alice" } });
+  const second = reviewThread({ id: "thread-2", lastComment: { ...reviewThread().lastComment, id: "comment-2", author: "alice" } });
   env.setPr(commentedStatus({ reviewThreads: [reviewThread(), second] })); env.advance();
   await tick(t, env.harness);
   assert.equal(env.sends.length, 3);
@@ -1027,20 +1034,80 @@ test("repeating on preserves attempts; two PRs of one owner send one request per
   assert.ok(env.sends[1].input[0].text.includes(url(11)));
 });
 
-test("a send failure reserves the trigger and disables automatic retries", async (t) => {
+for (const [kind, status] of [
+  ["failed checks", failingStatus()],
+  ["review feedback", commentedStatus()],
+  ["merge conflict", conflictStatus()],
+]) {
+  test(`Auto-fix reports uncertain delivery and keeps the ${kind} reservation on re-enable`, async (t) => {
+    const env = autoFixSetup(t);
+    env.setPr(status);
+    let sends = 0;
+    env.harness.inspection.sdk.stub("threads.send", async () => { sends++; throw new Error("delivery unknown"); });
+    await plugin(env.bb);
+    await enable(env.harness);
+    await tick(t, env.harness);
+    await tick(t, env.harness);
+    assert.equal(sends, 1);
+    const stopped = (await list(env.harness)).items.find((item) => item.number === 10).autoFix;
+    assert.equal(stopped.enabled, false);
+    assert.equal(stopped.attempts, 1);
+    assert.equal(stopped.lastSentAt, null);
+    assert.match(stopped.stoppedReason, /Delivery unconfirmed.*Check the owner thread/);
+
+    const reloaded = await env.harness.lifecycle.reload(plugin);
+    t.after(() => reloaded.harness.lifecycle.dispose());
+    const enabled = await reloaded.harness.behavior.callRpc("setAutoFix", { threadId: "R", url: url(10), enabled: true });
+    assert.equal(enabled.ok, true);
+    assert.match(enabled.message, /new triggers.*Delivery unconfirmed/);
+    await tick(t, reloaded.harness);
+    const active = (await list(reloaded.harness)).items.find((item) => item.number === 10).autoFix;
+    assert.equal(active.enabled, true);
+    assert.match(active.activity, /Delivery unconfirmed/);
+    assert.equal(active.attempts, 0);
+    assert.equal(sends, 1);
+  });
+}
+
+test("Auto-fix preserves an unconfirmed reservation saved by v0.1.0", async (t) => {
   const env = autoFixSetup(t);
-  let sends = 0;
-  env.harness.inspection.sdk.stub("threads.send", async () => { sends++; throw new Error("delivery unknown"); });
+  const trigger = JSON.stringify(["head-1", "checks", ["lint", "unit"]]);
+  await env.bb.storage.kv.set("autofix:o/r#10", {
+    url: url(10), hostId: "host-1", ownerThreadId: "R", enabled: false,
+    attempts: 1, lastTriggerKey: trigger, lastSentAt: null, stoppedReason: "Send failed; enable to retry",
+  });
   await plugin(env.bb);
+  const stopped = (await list(env.harness)).items.find((item) => item.number === 10).autoFix;
+  assert.match(stopped.stoppedReason, /Delivery unconfirmed/);
   await enable(env.harness);
   await tick(t, env.harness);
+  assert.equal(env.sends.length, 0);
+});
+
+test("Auto-fix releases a reservation when cancelled before send", async (t) => {
+  const env = autoFixSetup(t);
+  env.setPr(commentedStatus());
+  await plugin(env.bb);
+  await enable(env.harness);
+
+  const kv = env.bb.storage.kv;
+  const originalSet = kv.set.bind(kv);
+  let service;
+  const mock = t.mock.method(kv, "set", async (key, value) => {
+    await originalSet(key, value);
+    if (value.deliveryUnconfirmed) service.controller.abort();
+  });
+
+  service = env.harness.behavior.runService("auto-fix");
+  await service.done;
+  mock.mock.restore();
+  assert.equal(env.sends.length, 0);
+  const afterCancel = (await list(env.harness)).items.find((item) => item.number === 10).autoFix;
+  assert.equal(afterCancel.attempts, 0);
+  assert.deepEqual(afterCancel.sentThreadKeys, []);
+
   await tick(t, env.harness);
-  assert.equal(sends, 1);
-  const pr = (await list(env.harness)).items.find((item) => item.number === 10);
-  assert.equal(pr.autoFix.enabled, false);
-  assert.equal(pr.autoFix.attempts, 1);
-  assert.equal(pr.autoFix.lastSentAt, null);
-  assert.equal(pr.autoFix.stoppedReason, "Send failed; enable to retry");
+  assert.equal(env.sends.length, 1);
 });
 
 test("setAutoFix refuses enabling completed PRs and archived or deleted owners", async (t) => {
@@ -1070,6 +1137,60 @@ test("descendant reads and Mark ready use their own machine", async (t) => {
   const ready = await harness.behavior.callRpc("markReady", { threadId: "R", url: url(12) });
   assert.equal(ready.ok, true);
   assert.equal(hostCalls.find((call) => call.method === "markReady").hostId, "child-host");
+});
+
+for (const rootEnvironment of [null, "eR"]) {
+  test(`a linked PR cannot borrow a child machine when the root environment is ${rootEnvironment ?? "absent"}`, async (t) => {
+    const threads = { ...THREADS, R: { ...THREADS.R, environmentId: rootEnvironment } };
+    const links = { R: [{ repo: "o/r", issue: 11, kind: "pull" }, { repo: "o/r", issue: 9, kind: "pull" }] };
+    const env = setup({
+      threads, links, descendantIds: ["C"], environmentHost: (id) => id === "eC" ? "child-host" : null,
+      onAction: actionReply,
+      readPr: (prUrl) => ({ ok: true, pr: status(Number(prUrl.split("/").at(-1)), prUrl === url(9) ? "draft" : "open") }),
+    });
+    t.after(() => env.harness.lifecycle.dispose());
+    await plugin(env.bb);
+    await list(env.harness);
+
+    const openPr = { threadId: "R", url: url(11) };
+    for (const [method, input] of [
+      ["requestCopilotReview", openPr], ["rerunFailedCi", { ...openPr, expectedHead: ACTION_HEAD }],
+      ["prepareMerge", openPr], ["markDraft", openPr], ["markReady", { ...openPr, url: url(9) }],
+      ["setAutoFix", { ...openPr, enabled: true }],
+    ]) {
+      const result = await env.harness.behavior.callRpc(method, input);
+      assert.equal(result.ok, false, method);
+      assert.match(result.message, /machine is unavailable/, method);
+    }
+    assert.deepEqual(env.hostCalls, [{ method: "fetchPullRequests", input: { urls: [url(12)] }, hostId: "child-host" }]);
+  });
+}
+
+test("Auto-fix re-resolves the root machine for a link owned by a child without an environment", async (t) => {
+  let rootHost = "first-root-host";
+  const env = autoFixSetup(t, { environmentHost: (id) => id === "eR" ? rootHost : "child-host" });
+  await plugin(env.bb);
+  await enable(env.harness, 13);
+  rootHost = "new-root-host";
+  env.hostCalls.length = 0;
+  await tick(t, env.harness);
+  assert.deepEqual(env.hostCalls, [{ method: "fetchPullRequests", input: { urls: [url(13)] }, hostId: "new-root-host" }]);
+  assert.deepEqual(env.sends.map((send) => send.threadId), ["G"]);
+});
+
+test("Auto-fix ignores a legacy machine saved for an owner without an environment", async (t) => {
+  const threads = { ...THREADS, R: { ...THREADS.R, environmentId: null } };
+  const env = autoFixSetup(t, { threads, environmentHost: () => "child-host" });
+  await env.bb.storage.kv.set("autofix:o/r#11", {
+    url: url(11), hostId: "child-host", ownerThreadId: "R", enabled: true,
+    attempts: 0, lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
+  });
+  await plugin(env.bb);
+  await tick(t, env.harness);
+  assert.equal(env.hostCalls.length, 0);
+  assert.equal(env.sends.length, 0);
+  const result = await list(env.harness);
+  assert.equal(result.items.find((item) => item.number === 11).autoFix.activity, "Machine unavailable");
 });
 
 test("one machine's cached status cannot suppress another machine's GitHub read", async (t) => {
