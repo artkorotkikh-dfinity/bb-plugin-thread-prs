@@ -14,6 +14,7 @@ import {
   reviewStateSchema,
   rpcContract,
   THREAD_PRS_TAG,
+  truncationText,
   type PrSource,
   type PrStatus,
   type ThreadPr,
@@ -117,22 +118,23 @@ type Collected = {
   refs: Ref[];
   ownBranchKey: string | null;
   hostId: string | null;
+  truncationReason: ThreadPrs["truncationReason"];
 };
 
 type CacheEntry = { status: PrStatus | null; error: string | null; fetchedAt: number };
 
 function ttlFor(entry: CacheEntry): number {
-  if (entry.status === null) return TTL_ERROR_MS;
+  if (entry.error !== null || entry.status === null) return TTL_ERROR_MS;
   if (entry.status.state === "merged" || entry.status.state === "closed") return TTL_DONE_MS;
   if (entry.status.checks.state === "pending") return TTL_PENDING_MS;
   return TTL_OPEN_MS;
 }
 
-// Two reads of one PR: keep the one GitHub stamped later (bb's row can lag behind ours, or lead it).
+// Checks can change without updatedAt changing, so ties favor our gh read in assemble.
 function newer(a: PrStatus | null, b: PrStatus | null): PrStatus | null {
   if (a === null) return b;
   if (b === null) return a;
-  return Date.parse(b.updatedAt) > Date.parse(a.updatedAt) ? b : a;
+  return Date.parse(b.updatedAt) >= Date.parse(a.updatedAt) ? b : a;
 }
 
 const stateRank: Record<string, number> = { open: 0, draft: 0, merged: 1, closed: 2 };
@@ -164,6 +166,14 @@ export default async function plugin(bb: BbPluginApi) {
       experimental_optionLabels: { bb: "bb's browser", system: "System browser" },
       default: "bb",
     },
+    completedPullRequests: {
+      type: "select",
+      label: "Completed pull requests",
+      description: "Hide merged and closed pull requests from the list. The CLI always lists everything.",
+      options: ["all", "activeOnly"],
+      experimental_optionLabels: { all: "All", activeOnly: "Open and draft only" },
+      default: "all",
+    },
   });
 
   const host = bb.hosts.experimental_client({ contract: hostContract });
@@ -192,7 +202,9 @@ export default async function plugin(bb: BbPluginApi) {
     const ids = [
       threadId,
       ...(descendants.threads.find((entry) => entry.threadId === threadId)?.descendantIds ?? []),
-    ].slice(0, MAX_THREADS);
+    ];
+    let truncationReason: Collected["truncationReason"] = ids.length > MAX_THREADS ? "threads" : null;
+    ids.length = Math.min(ids.length, MAX_THREADS);
 
     const threads = new Map<string, { title: string | null; environmentId: string | null }>();
     await Promise.all(
@@ -216,7 +228,10 @@ export default async function plugin(bb: BbPluginApi) {
       const key = prKey(parsed.repo, parsed.number);
       let ref = refs.get(key);
       if (ref === undefined) {
-        if (refs.size >= MAX_PRS) return;
+        if (refs.size >= MAX_PRS) {
+          truncationReason = "pullRequests";
+          return;
+        }
         ref = { key, ...parsed, sources: [], builtin: null, environmentId: null };
         refs.set(key, ref);
       }
@@ -286,7 +301,7 @@ export default async function plugin(bb: BbPluginApi) {
       hostId = await hostIdFor(environmentId, signal);
     }
 
-    return { refs: [...refs.values()], ownBranchKey, hostId };
+    return { refs: [...refs.values()], ownBranchKey, hostId, truncationReason };
   }
 
   function assemble(threadId: string, collected: Collected): ThreadPrs {
@@ -307,7 +322,13 @@ export default async function plugin(bb: BbPluginApi) {
     });
     const rank = (item: ThreadPr) => (item.status === null ? 0 : (stateRank[item.status.state] ?? 0));
     items.sort((a, b) => rank(a) - rank(b) || b.number - a.number || a.repo.localeCompare(b.repo));
-    return { threadId, items, ownBranchKey: collected.ownBranchKey };
+    return {
+      threadId,
+      items,
+      ownBranchKey: collected.ownBranchKey,
+      truncated: collected.truncationReason !== null,
+      truncationReason: collected.truncationReason,
+    };
   }
 
   function store(url: string, next: CacheEntry): boolean {
@@ -365,9 +386,11 @@ export default async function plugin(bb: BbPluginApi) {
           if (store(url, next)) changed = true;
         }
       }
-      const signature = collected.refs
-        .map((ref) => `${ref.key}:${ref.sources.map((s) => s.kind + s.threadId).join("+")}`)
-        .join(",");
+      const signature = JSON.stringify([
+        collected.refs.map((ref) => [ref.key, ref.sources, ref.builtin]),
+        collected.ownBranchKey,
+        collected.truncationReason,
+      ]);
       if (lastSignature.get(threadId) !== signature) {
         lastSignature.set(threadId, signature);
         changed = true;
@@ -494,10 +517,12 @@ export default async function plugin(bb: BbPluginApi) {
           if (json) return { exitCode: 0, stdout: JSON.stringify(result, null, 2) };
           return {
             exitCode: 0,
-            stdout:
+            stdout: [
               result.items.length === 0
                 ? "No pull requests."
                 : result.items.map((item) => formatItem(item, result.ownBranchKey)).join("\n"),
+              truncationText(result),
+            ].filter(Boolean).join("\n"),
           };
         }
         case "ready": {

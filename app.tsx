@@ -15,7 +15,7 @@ import {
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
-import { rpcContract, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
+import { rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
 import { cn } from "@/lib/utils";
 
 // Same tokens and icons as bb's GitHub PR Status plugin, so both segments read as siblings.
@@ -35,11 +35,36 @@ const REVIEW: Record<PrStatus["review"], { label: string; text: string } | null>
 };
 
 function useThreadPrs(threadId: string) {
-  return experimental_useRpcQuery({
+  const query = experimental_useRpcQuery({
     contract: rpcContract,
     method: "threadPullRequests",
     input: { threadId },
   });
+  const completedPullRequests = useSettings().values?.completedPullRequests;
+  const items = filterItems(query.data?.items ?? [], completedPullRequests);
+  return {
+    data: query.data === undefined ? undefined : { ...query.data, items },
+    hiddenCount: (query.data?.items.length ?? 0) - items.length,
+    mixedRepos: new Set(query.data?.items.map((item) => item.repo.toLowerCase())).size > 1,
+    activeOnly: completedPullRequests === "activeOnly",
+  };
+}
+
+function filterItems(items: ThreadPr[], completedPullRequests: unknown): ThreadPr[] {
+  return completedPullRequests === "activeOnly"
+    ? items.filter((item) => item.status === null || item.status.state === "open" || item.status.state === "draft")
+    : items;
+}
+
+function numberLabel(item: ThreadPr, mixedRepos: boolean): string {
+  return `${mixedRepos ? item.repo.split("/")[1] : ""}#${item.number}`;
+}
+
+function listNotes(data: ThreadPrs, hiddenCount: number): string[] {
+  return [
+    hiddenCount > 0 ? `${hiddenCount} merged or closed hidden` : null,
+    truncationText(data),
+  ].filter((note): note is string => note !== null);
 }
 
 /** The list adds something only when it holds a PR other than the one bb's own segment shows. */
@@ -146,7 +171,8 @@ function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: stri
       item.error === null ? (
         <span key="loading">Loading status…</span>
       ) : (
-        <span key="error" title={item.error}>
+        <span key="error" title={item.error} className="inline-flex items-center gap-1">
+          <Icon name="AlertTriangle" className="size-3" aria-hidden />
           Status unavailable
         </span>
       ),
@@ -216,7 +242,12 @@ function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: stri
   );
 }
 
-function PrRow({ threadId, item, ownBranchKey }: { threadId: string; item: ThreadPr; ownBranchKey: string | null }) {
+function PrRow({ threadId, item, ownBranchKey, mixedRepos }: {
+  threadId: string;
+  item: ThreadPr;
+  ownBranchKey: string | null;
+  mixedRepos: boolean;
+}) {
   const open = useOpenUrl();
   const status = item.status;
   const state = status === null ? null : STATE[status.state];
@@ -238,7 +269,7 @@ function PrRow({ threadId, item, ownBranchKey }: { threadId: string; item: Threa
           title={`${item.repo}#${item.number} ${title}`}
           className="flex min-w-0 items-baseline gap-1.5 text-foreground no-underline hover:underline"
         >
-          <span className="shrink-0 tabular-nums">#{item.number}</span>
+          <span className="shrink-0 tabular-nums">{numberLabel(item, mixedRepos)}</span>
           <span className="min-w-0 truncate">{title}</span>
         </a>
         <StatusLine item={item} ownBranchKey={ownBranchKey} />
@@ -248,21 +279,32 @@ function PrRow({ threadId, item, ownBranchKey }: { threadId: string; item: Threa
   );
 }
 
-function PrList({ threadId, data }: { threadId: string; data: ThreadPrs }) {
+function PrList({ threadId, data, hiddenCount, mixedRepos }: {
+  threadId: string;
+  data: ThreadPrs;
+  hiddenCount: number;
+  mixedRepos: boolean;
+}) {
   return (
     <ul aria-label="Pull requests of this thread and its child threads" className="flex max-h-60 flex-col overflow-y-auto">
       {data.items.map((item) => (
-        <PrRow key={item.key} threadId={threadId} item={item} ownBranchKey={data.ownBranchKey} />
+        <PrRow key={item.key} threadId={threadId} item={item} ownBranchKey={data.ownBranchKey} mixedRepos={mixedRepos} />
+      ))}
+      {listNotes(data, hiddenCount).map((note) => (
+        <li key={note} className="px-1.5 py-1 text-xs text-muted-foreground">{note}</li>
       ))}
     </ul>
   );
 }
 
 function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadContextSegmentProps) {
-  const { data } = useThreadPrs(threadId);
+  const { data, hiddenCount, activeOnly } = useThreadPrs(threadId);
   if (!hasExtras(data)) return null;
   const dots = data.items.slice(0, 6);
-  const label = `${data.items.length} pull requests from this thread and its child threads`;
+  const label = [
+    `${data.items.length} ${activeOnly ? "active " : ""}pull requests from this thread and its child threads`,
+    ...listNotes(data, hiddenCount),
+  ].join(" · ");
   return (
     <button
       type="button"
@@ -276,7 +318,7 @@ function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadCo
       )}
     >
       <Icon name="GitPullRequest" className="size-3.5 shrink-0" aria-hidden />
-      <span className="shrink-0 tabular-nums">PRs {data.items.length}</span>
+      <span className="shrink-0 tabular-nums">{activeOnly ? "Active PRs" : "PRs"} {data.items.length}</span>
       <span className="flex shrink-0 items-center gap-0.5" data-promptbox-hide-compact="">
         {dots.map((item) => (
           <Dot
@@ -296,11 +338,11 @@ function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadCo
 }
 
 function SegmentDetails({ threadId, isExpanded }: ExperimentalThreadContextSegmentProps) {
-  const { data } = useThreadPrs(threadId);
+  const { data, hiddenCount, mixedRepos } = useThreadPrs(threadId);
   if (!isExpanded || !hasExtras(data)) return null;
   return (
     <div className="px-1.5 pb-1.5">
-      <PrList threadId={threadId} data={data} />
+      <PrList threadId={threadId} data={data} hiddenCount={hiddenCount} mixedRepos={mixedRepos} />
     </div>
   );
 }
@@ -312,7 +354,7 @@ function useSegmentVisible({ threadId }: ExperimentalThreadContextSegmentInput):
 }
 
 function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
-  const { data } = useThreadPrs(threadId);
+  const { data, hiddenCount, mixedRepos } = useThreadPrs(threadId);
   const openPullRequest = useOpenPullRequest();
   if (!hasExtras(data)) return null;
   return (
@@ -321,6 +363,8 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
         const status = item.status;
         const state = status === null ? null : STATE[status.state];
         const checks = status === null ? null : checksText(status);
+        const source = sourceText(item, data.ownBranchKey);
+        const review = status?.review === "approved" || status?.review === "changes_requested" ? REVIEW[status.review] : null;
         return (
           <ThreadContextCardRow
             key={item.key}
@@ -331,14 +375,26 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
                 aria-label={state?.label ?? "Pull request"}
               />
             }
-            label={`#${item.number} ${status?.title ?? item.repo}`}
+            label={
+              <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                <span>{numberLabel(item, mixedRepos)} {status?.title ?? item.repo}</span>
+                {source === null ? null : <span className="text-muted-foreground">{source.label}</span>}
+                {review === null ? null : <span className={cn("text-xs", review.text)}>{review.label}</span>}
+                {item.error === null ? null : (
+                  <span title={item.error} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <Icon name="AlertTriangle" className="size-3" aria-hidden />
+                    {status === null ? "Status unavailable" : "Not refreshed"}
+                  </span>
+                )}
+              </span>
+            }
             title={[
               `${item.repo}#${item.number}`,
               status?.title,
               state?.label,
               checks?.label,
               status ? REVIEW[status.review]?.label : null,
-              item.key === data.ownBranchKey ? "This branch" : null,
+              source?.label,
               item.error,
             ]
               .filter(Boolean)
@@ -357,6 +413,9 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
           />
         );
       })}
+      {listNotes(data, hiddenCount).map((note) => (
+        <div key={note} className="px-1.5 py-1 text-xs text-muted-foreground">{note}</div>
+      ))}
     </>
   );
 }

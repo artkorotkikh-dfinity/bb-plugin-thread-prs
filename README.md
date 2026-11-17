@@ -41,6 +41,17 @@ The system-browser path calls the desktop app's `window.bbDesktop.openExternalUr
 same bridge bb uses for its own external links, and falls back to a new tab in a web
 client. It is not a Plugin SDK API, so a bb release could rename it.
 
+`Completed pull requests` (`completedPullRequests`): `all` (**All**, default) shows every
+PR; `activeOnly` (**Open and draft only**) hides merged and closed PRs. Entries whose
+status is still loading or unavailable stay visible. The setting updates the composer
+segment, count, dots, expanded list and context card live; visible lists show how many
+merged or closed PRs are hidden. The CLI always lists everything. Change it in bb's
+plugin settings or with:
+
+```bash
+bb plugin config thread-prs set completedPullRequests activeOnly
+```
+
 ## Freshness
 
 Status comes from one batched `gh api graphql` call on the thread's machine, using
@@ -49,6 +60,8 @@ whatever `gh` is logged in there. The server caches each PR: 30 s while checks r
 GitHub only while some client shows the thread (`bb.rpc.experimental_whileWatched`),
 and re-checks the thread's links locally every 30 s. When bb's PR plugin has a newer
 read of a branch PR, that one wins.
+On equal GitHub timestamps, this plugin's read wins because checks can finish without
+changing the PR's timestamp. Lists report when the 50-PR or 200-thread limit cuts results.
 
 ## Install, enable, disable
 

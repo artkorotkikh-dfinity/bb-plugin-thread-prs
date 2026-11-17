@@ -48,21 +48,25 @@ const LINKS = {
   ],
 };
 
-function setup() {
+function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], readPr } = {}) {
   const hostCalls = [];
   const rpcCalls = [];
+  const rows = {
+    eR: builtinRow(10, "open", "2026-11-17T09:00:00Z"),
+    eC: builtinRow(12, "draft", "2026-11-17T10:00:00Z"),
+  };
   const { bb, harness } = createFakePluginHost({
     pluginId: "thread-prs",
     sdk: {
       threads: {
         experimental_listDescendants: async ({ threadIds }) => ({
-          threads: threadIds.map((threadId) => ({ threadId, descendantIds: threadId === "R" ? ["C", "G"] : [] })),
+          threads: threadIds.map((threadId) => ({ threadId, descendantIds: threadId === "R" ? descendantIds : [] })),
         }),
         get: async ({ threadId }) =>
-          makeThreadResponse({ id: threadId, title: THREADS[threadId].title, environmentId: THREADS[threadId].environmentId }),
+          makeThreadResponse({ id: threadId, title: threads[threadId].title, environmentId: threads[threadId].environmentId }),
         experimental_listPluginMetadata: async ({ pluginId, threadIds }) => {
           assert.equal(pluginId, "focus-board");
-          return { threads: threadIds.map((threadId) => ({ threadId, metadata: { linkedIssues: LINKS[threadId] ?? [] } })) };
+          return { threads: threadIds.map((threadId) => ({ threadId, metadata: { linkedIssues: links[threadId] ?? [] } })) };
         },
       },
       environments: { get: async ({ environmentId }) => ({ id: environmentId, hostId: "host-1" }) },
@@ -70,10 +74,6 @@ function setup() {
         callRpc: async ({ pluginId, method, input }) => {
           rpcCalls.push({ pluginId, method, input });
           if (method === "refresh") return { ok: true };
-          const rows = {
-            eR: builtinRow(10, "open", "2026-11-17T09:00:00Z"),
-            eC: builtinRow(12, "draft", "2026-11-17T10:00:00Z"),
-          };
           return Object.fromEntries(input.keys.map((key) => [key, rows[key] ?? { outcome: "absent" }]));
         },
       },
@@ -85,17 +85,17 @@ function setup() {
         9: status(9, "closed"),
         10: status(10, "open", "2026-11-17T10:00:00Z"), // newer than bb's row: ours wins
         11: status(11, "merged"),
-        12: status(12, "draft", "2026-11-17T10:00:00Z"), // same stamp as bb's row: bb's wins
+        12: status(12, "draft", "2026-11-17T10:00:00Z"), // checks can finish without changing the stamp
         13: status(13, "open", "2026-11-17T10:00:00Z", "pending"),
       };
       return {
         results: Object.fromEntries(
-          input.urls.map((u) => [u, { ok: true, pr: byNumber[Number(u.split("/").pop())] }]),
+          input.urls.map((u) => [u, readPr ? readPr(u) : { ok: true, pr: byNumber[Number(u.split("/").pop())] }]),
         ),
       };
     },
   });
-  return { bb, harness, hostCalls, rpcCalls };
+  return { bb, harness, hostCalls, rpcCalls, rows };
 }
 
 async function list(harness) {
@@ -114,6 +114,7 @@ test("collects links and branch PRs from the whole subtree, deduped and sorted",
     ["o/r#13", "o/r#12", "o/r#10", "o/r#11", "o/r#9"],
   );
   assert.equal(result.ownBranchKey, "o/r#10");
+  assert.equal(result.truncated, false);
 
   const pr10 = result.items.find((item) => item.number === 10);
   assert.deepEqual(
@@ -125,7 +126,9 @@ test("collects links and branch PRs from the whole subtree, deduped and sorted",
 
   const pr12 = result.items.find((item) => item.number === 12);
   assert.deepEqual(pr12.sources.map((s) => [s.kind, s.threadId]), [["branch", "C"]]);
-  assert.equal(pr12.statusSource, "github-pr-status");
+  assert.equal(pr12.statusSource, "gh");
+  assert.equal(pr12.status.title, "PR 12");
+  assert.equal(pr12.status.checks.total, 3);
 
   const pr13 = result.items.find((item) => item.number === 13);
   assert.deepEqual(pr13.sources.map((s) => [s.kind, s.threadId, s.threadTitle]), [["link", "G", "Grandchild"]]);
@@ -163,4 +166,98 @@ test("mark ready: only listed drafts, and bb's PR segment is refreshed for branc
     "bb--github-pr-status refresh for the child's environment",
   );
   await harness.lifecycle.dispose();
+});
+
+test("a changed bb row invalidates views while the gh cache is fresh", async (t) => {
+  const { bb, harness, hostCalls, rows } = setup();
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  await list(harness);
+  const before = harness.inspection.experimental_rpcInvalidations.length;
+
+  rows.eR.pullRequest.checks.failedCount = 1;
+  rows.eR.pullRequest.checks.state = "failing";
+  await list(harness);
+
+  assert.equal(hostCalls.length, 1);
+  assert.equal(harness.inspection.experimental_rpcInvalidations.length, before + 1);
+  assert.deepEqual(harness.inspection.experimental_rpcInvalidations.at(-1), ["thread-prs:R"]);
+});
+
+test("errors with a retained merged status retry after one minute", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  let fail = false;
+  const { bb, harness, hostCalls } = setup({
+    readPr: (u) => fail
+      ? { ok: false, message: "GitHub unavailable" }
+      : { ok: true, pr: status(Number(u.split("/").pop()), "merged") },
+  });
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  await list(harness);
+  now += 15 * 60_000;
+  fail = true;
+  const failed = await list(harness);
+  const retained = failed.items.find((item) => item.number === 11);
+  assert.equal(retained.status.state, "merged");
+  assert.equal(retained.error, "GitHub unavailable");
+  assert.equal(hostCalls.length, 2);
+
+  now += 59_999;
+  await list(harness);
+  assert.equal(hostCalls.length, 2);
+  now += 1;
+  fail = false;
+  const recovered = await list(harness);
+  assert.equal(hostCalls.length, 3);
+  assert.equal(recovered.items.find((item) => item.number === 11).error, null);
+});
+
+for (const count of [50, 51]) {
+  test(`PR limit: ${count} distinct PRs only flags truncation when something is cut`, async (t) => {
+    const { bb, harness } = setup({
+      threads: { R: { title: "Root", environmentId: null } },
+      descendantIds: [],
+      links: { R: Array.from({ length: count }, (_, i) => ({ repo: "o/r", issue: i + 1, kind: "pull" })) },
+    });
+    t.after(() => harness.lifecycle.dispose());
+    await plugin(bb);
+    const result = await list(harness);
+    assert.equal(result.items.length, 50);
+    assert.equal(result.truncated, count > 50);
+    assert.equal(result.truncationReason, count > 50 ? "pullRequests" : null);
+    const text = await harness.behavior.runCli(["list", "R"]);
+    assert.equal(text.stdout.includes("Only the first 50 pull requests are shown"), count > 50);
+  });
+}
+
+for (const count of [200, 201]) {
+  test(`thread limit: ${count} threads only flags truncation when something is cut`, async (t) => {
+    const ids = ["R", ...Array.from({ length: count - 1 }, (_, i) => `C${i}`)];
+    const { bb, harness } = setup({
+      threads: Object.fromEntries(ids.map((id) => [id, { title: id, environmentId: null }])),
+      descendantIds: ids.slice(1),
+      links: {},
+    });
+    t.after(() => harness.lifecycle.dispose());
+    await plugin(bb);
+    const result = await list(harness);
+    assert.equal(result.truncated, count > 200);
+    assert.equal(result.truncationReason, count > 200 ? "threads" : null);
+    assert.equal(harness.inspection.sdk.callsTo("threads.get").length, 400);
+    const text = await harness.behavior.runCli(["list", "R"]);
+    assert.equal(text.stdout.includes("Only the first 200 threads were read"), count > 200);
+  });
+}
+
+test("the completed PR setting leaves CLI results complete", async (t) => {
+  const { bb, harness } = setup();
+  t.after(() => harness.lifecycle.dispose());
+  await plugin(bb);
+  await harness.behavior.setSettings({ completedPullRequests: "activeOnly" });
+  const result = await list(harness);
+  assert.equal(result.items.length, 5);
+  assert.ok(result.items.some((item) => item.status.state === "merged"));
+  assert.ok(result.items.some((item) => item.status.state === "closed"));
 });

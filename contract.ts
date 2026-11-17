@@ -60,10 +60,19 @@ export type ThreadPr = z.infer<typeof threadPrSchema>;
 export const threadPrsSchema = z.object({
   threadId: z.string(),
   items: z.array(threadPrSchema),
+  truncated: z.boolean(),
+  truncationReason: z.enum(["threads", "pullRequests"]).nullable(),
   /** The root thread's own current-branch PR key, which bb's PR segment already shows. */
   ownBranchKey: z.string().nullable(),
 });
 export type ThreadPrs = z.infer<typeof threadPrsSchema>;
+
+export function truncationText(data: ThreadPrs): string | null {
+  if (!data.truncated) return null;
+  return data.truncationReason === "pullRequests"
+    ? "Only the first 50 pull requests are shown"
+    : "Only the first 200 threads were read";
+}
 
 export const THREAD_PRS_TAG = "thread-prs";
 
