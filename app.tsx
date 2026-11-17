@@ -15,7 +15,7 @@ import {
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
-import { rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
+import { autoFixLastSendLabel, rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
 import { cn } from "./lib/utils";
 import { Tooltip } from "./lib/tooltip";
 import { PrQuickActions } from "./lib/pr-actions";
@@ -189,7 +189,7 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
           <span className="font-medium">{state.enabled ? "Auto-fix enabled" : "Auto-fix disabled"}</span>
           <span>{state.stoppedReason ?? state.activity ?? "Enable to monitor CI and review feedback"}</span>
           {state.lastSentAt === null ? null : (
-            <span>Last request: {new Date(state.lastSentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {state.attempts}/3 attempts</span>
+            <span>{autoFixLastSendLabel(state)}</span>
           )}
           <span className="text-muted-foreground">Target: {state.ownerThreadTitle ?? state.ownerThreadId}</span>
         </span>
@@ -209,7 +209,7 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
         </button>
       </Tooltip>
       <span id={descriptionId} role="status" className="sr-only">
-        {[state.stoppedReason ?? state.activity, `Target: ${state.ownerThreadTitle ?? state.ownerThreadId}`].filter(Boolean).join(". ")}
+        {[state.stoppedReason ?? state.activity, autoFixLastSendLabel(state), `Target: ${state.ownerThreadTitle ?? state.ownerThreadId}`].filter(Boolean).join(". ")}
       </span>
     </span>
   );
@@ -438,6 +438,7 @@ function PrChip({ item, mixedRepos }: { item: ThreadPr; mixedRepos: boolean }) {
     status === null ? null : checksText(status).label,
     status === null ? null : REVIEW[status.review]?.label ?? "No review",
     `Auto-fix ${item.autoFix.enabled ? "on" : "off"}`,
+    item.autoFix.activity, autoFixLastSendLabel(item.autoFix),
   ].filter(Boolean).join(" · ");
   return (
     <Tooltip content={description}>

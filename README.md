@@ -105,44 +105,63 @@ an open list. Enabling Auto-fix wakes that worker immediately; it does not wait 
 the next two-minute poll. On reload, the first automatic poll waits 30 seconds for
 plugin registration. It shares the
 list's machine-scoped cache and batches stale enabled PRs into host calls of up to
-50 PRs per machine. A new failing-check set or changes-requested review
-triggers a short request to the owner: fix the named branch, push, and reply with
-what changed. The request includes the PR URL, failing checks and their links (or
-the reviewer), identifies the Thread PRs plugin, and says
-"Don't merge, close or force-push."
+50 PRs per machine. A new failing-check set, changes-requested review, or actionable
+unresolved review comment triggers a request to the owner. Comments from Copilot
+and people count even when GitHub records their review as `COMMENTED` and leaves
+the PR's review decision at `REVIEW_REQUIRED`.
+
+The request includes the PR URL, branch, failing checks and their links, and new
+actionable threads. Each thread includes `path:startLine-line`, the first comment's
+author, up to 600 characters of its body, and its URL. It asks the agent to check
+each comment against the code because Copilot comments are often wrong, fix only
+valid ones on the named branch and push, then report fixes and rejected comments
+with reasons. It forbids GitHub replies, resolving threads, merging, closing and
+force-pushing. Checks and new comments share one request when both are present.
 
 Guardrails:
 
-- Sends only for open or draft PRs, after every check has finished. Rollups with
-  more than 100 contexts are treated as incomplete and do not trigger Auto-fix.
+- Sends only for open or draft PRs. Check and changes-requested review triggers
+  wait for settled, complete CI data (at most 100 contexts). New actionable comments
+  do not wait for pending checks or a complete CI rollup.
 - Waits for the owner to be idle, with no active background agents or queued
   messages. Archived, deleted and unavailable owners never receive requests.
 - Uses the head commit plus sorted failing check names, or the head commit plus
-  the latest changes-requested review id. The same trigger is not sent twice in
+  the latest changes-requested review id for reviews without inline threads.
+  Reviews with inline threads use the thread rules below. The same trigger is not sent twice in
   a row, including after a plugin reload. When both checks and review fail,
   the check trigger takes precedence and the message includes both.
+- Reads the first 50 review threads. A thread is actionable only while unresolved,
+  not outdated, and its last comment is not by the PR author. An author's reply
+  leaves the ball with the reviewer. Dedupe uses thread id plus last comment id,
+  persisted per PR: a push does not repeat a thread; a new reviewer comment can
+  trigger again. A request includes only new actionable thread keys.
 - Sends at most three requests before disabling itself with **Stopped after 3
-  tries**. Clicking it again resets the attempt count. Repeating `on` while
-  already enabled does not reset the limit.
+  tries**, shared across all trigger kinds. Clicking it again resets the attempt
+  count but retains sent thread keys. Repeating `on` while already enabled does
+  not reset the limit.
 - Reserves each attempt durably before sending. A crash can consume an attempt
   without delivering it. A send error disables Auto-fix; explicitly enable it
   again to retry. It never automatically repeats an ambiguously delivered send.
 - Failed GitHub reads never trigger from retained status. Branch/head details
-  must come from a complete successful read by this plugin. A partial GraphQL error,
-  missing commit data, or any queued or running check prevents an automatic request.
+  must come from a successful read by this plugin. A partial GraphQL error or missing
+  branch/head details prevents any request; incomplete or unsettled CI prevents
+  requests unless there are new actionable comments.
 - If neither the owner's links nor its environment's branch PR still associate
   it with the PR, polling pauses. You can still turn off its saved subscription with
   `bb thread-prs autofix <pr-url> off [thread-id]` after its row disappears.
 
 The toggle keeps a stable **Auto-fix** label and shows a green dot when enabled.
 Hover it or focus it with the keyboard to see the current activity, target thread,
-last request time and attempt count. State is stored per PR in the plugin's
+last request time, attempt count and purpose, such as
+`Sent 14:02 (1/3) · 1 review comment`. The CLI reports the same summary.
+State is stored per PR in the plugin's
 `bb.storage.kv`, shared across every list containing that PR. Turning it off stops
 future requests; work already sent to an agent continues. The agent uses its
 existing permissions and credentials, so a request does not guarantee a fix.
 
 Routine activity, such as **Waiting for CI**, **Waiting for agent**,
-**No action needed**, or **Already requested for this commit**, stays in the tooltip
+**No action needed**, **Already requested for this commit**, or
+**Already requested for these comments**, stays in the tooltip
 and remains available to screen readers. An attention icon stays visible when the
 owner, machine, PR link or CI data is unavailable, or the subscription has stopped.
 The target thread is named in the tooltip, including when it differs from the
@@ -248,13 +267,15 @@ dependencies, so the SDK used by the host entry is a runtime dependency.
 PR status is read directly from GitHub. Auto-fix settings and attempt history stay
 in this plugin's BB storage; the plugin adds no telemetry or external backend.
 GitHub credentials stay in the machine's existing `gh` configuration. Auto-fix sends
-the PR URL, branch, failing check names and links, and reviewer identity to the
+the PR URL, branch, failing check names and links, reviewer identity, and review
+comment excerpts, locations and URLs to the
 owner's agent, which uses its existing model provider.
 
 The list reads at most 200 threads and 50 distinct PRs, and labels truncated results.
 Provider-internal subagents are not BB child threads: link their PRs on Focus Board
-to include them. Auto-fix skips rollups above 100 contexts rather than acting on
-partial CI data. It cannot guarantee a fix, and an attempt reserved just before a
+to include them. Auto-fix skips CI triggers for rollups above 100 contexts;
+comment triggers remain independent of CI. Only the first 50 review threads are
+inspected. It cannot guarantee a fix, and an attempt reserved just before a
 crash may be consumed without delivery. Avoid running another automatic PR fixer
 on the same thread and PR.
 

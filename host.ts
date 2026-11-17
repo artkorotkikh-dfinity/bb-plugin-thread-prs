@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { z } from "zod";
-import { commitOidSchema, hostContract, parsePrUrl, type GhRead, type MergeMethod, type MergePreview, type PrStatus } from "./contract.js";
+import { commitOidSchema, hostContract, parsePrUrl, reviewThreadSchema, type GhRead, type MergeMethod, type MergePreview, type PrStatus } from "./contract.js";
 
 const GH_TIMEOUT_MS = 20_000;
 
@@ -32,6 +32,12 @@ function runGh(args: string[], signal: AbortSignal): Promise<GhOutput> {
 }
 
 const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefOid headRefName
+  author { login }
+  reviewThreads(first: 50) { nodes {
+    id isResolved isOutdated path line startLine
+    firstComment: comments(first: 1) { nodes { id author { login } body url } }
+    lastComment: comments(last: 1) { nodes { id author { login } } }
+  } }
   reviews(last: 1, states: [CHANGES_REQUESTED]) { nodes { id author { login } } }
   reviewRequests(first: 1) { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
@@ -62,7 +68,7 @@ function toStatus(node: Json): PrStatus | null {
     const ctx = obj(raw);
     if (ctx === null) continue;
     // Queued reruns have no startedAt and can otherwise lose to the old failure.
-    // Any unresolved context prevents an automatic fix, even if a newer run exists.
+    // Any unresolved context prevents a CI trigger, even if a newer run exists.
     const pending = ctx.__typename === "CheckRun" ? ctx.status !== "COMPLETED" : PENDING_STATUS.has(String(ctx.state));
     if (pending) {
       unsettled = true;
@@ -138,6 +144,22 @@ function toStatus(node: Json): PrStatus | null {
       const author = obj(review.author)?.login;
       return { id: review.id, author: typeof author === "string" ? author : null };
     })(),
+    authorLogin: typeof obj(node.author)?.login === "string" ? String(obj(node.author)!.login) : null,
+    reviewThreads: ((obj(node.reviewThreads)?.nodes as unknown[] | undefined) ?? []).flatMap((raw) => {
+      const thread = obj(raw);
+      const first = obj((obj(thread?.firstComment)?.nodes as unknown[] | undefined)?.[0]);
+      const last = obj((obj(thread?.lastComment)?.nodes as unknown[] | undefined)?.[0]);
+      const login = (comment: Json | null) => {
+        const value = obj(comment?.author)?.login;
+        return typeof value === "string" ? value : null;
+      };
+      const parsed = reviewThreadSchema.safeParse({
+        ...thread,
+        firstComment: { ...first, author: login(first) },
+        lastComment: { ...last, author: login(last) },
+      });
+      return parsed.success ? [parsed.data] : [];
+    }),
   };
 }
 

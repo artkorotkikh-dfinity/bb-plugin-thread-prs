@@ -16,6 +16,17 @@ export const reviewStateSchema = z.enum([
   "none",
 ]);
 
+export const reviewThreadSchema = z.object({
+  id: z.string(),
+  isResolved: z.boolean(),
+  isOutdated: z.boolean(),
+  path: z.string(),
+  line: z.number().int().nullable(),
+  startLine: z.number().int().nullable(),
+  firstComment: z.object({ id: z.string(), author: z.string().nullable(), body: z.string(), url: z.string() }),
+  lastComment: z.object({ id: z.string(), author: z.string().nullable() }),
+});
+
 export const prStatusSchema = z.object({
   number: z.number().int().positive(),
   title: z.string(),
@@ -35,6 +46,8 @@ export const prStatusSchema = z.object({
   failingChecks: z.array(z.object({ name: z.string(), detailsUrl: z.string().nullable() })).optional(),
   checksComplete: z.boolean().optional(),
   latestChangesRequested: z.object({ id: z.string(), author: z.string().nullable() }).nullable().optional(),
+  authorLogin: z.string().nullable().optional(),
+  reviewThreads: z.array(reviewThreadSchema).optional(),
 });
 export type PrStatus = z.infer<typeof prStatusSchema>;
 
@@ -55,17 +68,23 @@ export const autoFixSchema = z.object({
   lastTriggerKey: z.string().nullable(),
   lastSentAt: z.number().nullable(),
   stoppedReason: z.string().nullable(),
+  sentThreadKeys: z.array(z.string()).default([]),
+  lastSentSummary: z.string().nullable().default(null),
 });
 export type AutoFix = z.infer<typeof autoFixSchema>;
 
 export function autoFixLabel(state: AutoFix): string {
   if (state.stoppedReason) return state.stoppedReason;
   if (!state.enabled) return "Auto-fix";
+  return autoFixLastSendLabel(state) ?? "Auto-fix on";
+}
+
+export function autoFixLastSendLabel(state: AutoFix): string | null {
   if (state.lastSentAt !== null) {
     const time = new Date(state.lastSentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-    return `Sent ${time} (${state.attempts}/3)`;
+    return `Sent ${time} (${state.attempts}/3)${state.lastSentSummary ? ` · ${state.lastSentSummary}` : ""}`;
   }
-  return "Auto-fix on";
+  return null;
 }
 
 export const prSourceSchema = z.object({

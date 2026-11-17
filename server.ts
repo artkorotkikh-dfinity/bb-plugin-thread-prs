@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   autoFixLabel,
+  autoFixLastSendLabel,
   autoFixSchema,
   hostContract,
   parsePrUrl,
@@ -248,7 +249,7 @@ export default async function plugin(bb: BbPluginApi) {
     const owner = ownerOf(ref);
     const saved = autoFix.get(ref.key);
     return {
-      ...(saved ? autoFixSchema.parse(saved) : {
+      ...autoFixSchema.parse(saved ?? {
         enabled: false, ownerThreadId: owner.threadId, attempts: 0,
         lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
       }),
@@ -550,9 +551,10 @@ export default async function plugin(bb: BbPluginApi) {
       await saveAutoFix(ref.key, enabled ? {
         enabled: true, ownerThreadId: owner.threadId, attempts: 0,
         lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
+        sentThreadKeys: previous?.sentThreadKeys ?? [], lastSentSummary: null,
         url: ref.url, hostId: hostId ?? ref.hostId,
       } : {
-        ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, url: ref.url, hostId: null }),
+        ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, sentThreadKeys: [], lastSentSummary: null, url: ref.url, hostId: null }),
         enabled: false, stoppedReason: null,
       });
       if (enabled) {
@@ -605,18 +607,30 @@ export default async function plugin(bb: BbPluginApi) {
         reportAutoFix(key, "GitHub status unavailable"); continue;
       }
       if (pr.state !== "open" && pr.state !== "draft") { reportAutoFix(key, "PR completed"); continue; }
-      if (pr.checks.pending > 0 || pr.checks.state === "pending") { reportAutoFix(key, "Waiting for CI"); continue; }
-      if (pr.checksComplete !== true || !pr.headRefOid || !pr.headRefName) {
+      const threadKey = (thread: NonNullable<PrStatus["reviewThreads"]>[number]) =>
+        JSON.stringify([thread.id, thread.lastComment.id]);
+      const actionable = (pr.reviewThreads ?? []).filter((thread) =>
+        !thread.isResolved && !thread.isOutdated && pr.authorLogin &&
+        thread.lastComment.author?.toLowerCase() !== pr.authorLogin.toLowerCase());
+      const sentThreadKeys = new Set(state.sentThreadKeys);
+      const comments = actionable.filter((thread) => !sentThreadKeys.has(threadKey(thread)));
+      const pending = pr.checks.pending > 0 || pr.checks.state === "pending";
+      if (!comments.length && pending) { reportAutoFix(key, "Waiting for CI"); continue; }
+      if ((!comments.length && pr.checksComplete !== true) || !pr.headRefOid || !pr.headRefName) {
         reportAutoFix(key, "Waiting for complete CI data"); continue;
       }
       const failing = pr.failingChecks ?? [];
-      const review = pr.review === "changes_requested" ? pr.latestChangesRequested : null;
-      if (!failing.length && !review) { reportAutoFix(key, "No action needed"); continue; }
+      // Inline feedback uses thread keys, even for CHANGES_REQUESTED reviews.
+      // Keep the existing review trigger for reviews without inline threads.
+      const review = pr.review === "changes_requested" && !pr.reviewThreads?.length ? pr.latestChangesRequested : null;
+      if (!failing.length && !review && !comments.length) {
+        reportAutoFix(key, actionable.length ? "Already requested for these comments" : "No action needed"); continue;
+      }
       // Prefer checks when both fail; include the review in the same request.
       const triggerKey = JSON.stringify(failing.length
         ? [pr.headRefOid, "checks", failing.map((check) => check.name).sort()]
-        : [pr.headRefOid, "review", review!.id]);
-      if (triggerKey === state.lastTriggerKey) { reportAutoFix(key, "Already requested for this commit"); continue; }
+        : review ? [pr.headRefOid, "review", review.id] : null);
+      if (!comments.length && triggerKey === state.lastTriggerKey) { reportAutoFix(key, "Already requested for this commit"); continue; }
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
       if (!thread || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" ||
           thread.runtime.displayStatus !== "idle" || thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0) {
@@ -626,10 +640,27 @@ export default async function plugin(bb: BbPluginApi) {
         `[Thread PRs plugin · Auto-fix] Fix ${state.url} on branch ${JSON.stringify(pr.headRefName)}.`,
         ...failing.map((check) => `Failing check: ${JSON.stringify(check.name)} — ${check.detailsUrl ?? `${state.url}/checks`}`),
         review ? `Reviewer ${JSON.stringify(review.author ?? "unknown")} requested changes (${review.id}).` : null,
-        "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
+        ...comments.map((thread) => {
+          const line = thread.line ?? thread.startLine;
+          const location = `${thread.path}:${thread.startLine ?? line ?? "?"}-${line ?? "?"}`;
+          const body = thread.firstComment.body;
+          return `Review comment: ${location} by ${JSON.stringify(thread.firstComment.author ?? "unknown")}\n${body.slice(0, 600)}${body.length > 600 ? "…" : ""}\n${thread.firstComment.url}`;
+        }),
+        comments.length
+          ? `Check each comment against the code; Copilot comments are often wrong. Fix only the valid ones on ${JSON.stringify(pr.headRefName)} and push. Don't reply on GitHub or resolve threads; don't merge, close or force-push. Reply here with what you fixed and which comments you rejected and why.`
+          : "Fix on that branch, push, and reply with what changed. Don't merge, close or force-push.",
       ].filter(Boolean).join("\n");
+      const summary = [
+        failing.length ? `${failing.length} failing check${failing.length === 1 ? "" : "s"}` : null,
+        review ? "changes requested" : null,
+        comments.length ? `${comments.length} review comment${comments.length === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(" · ");
       // Reserve before sending: a crash or ambiguous delivery must not repeat the request.
-      const next = { ...state, attempts: state.attempts + 1, lastTriggerKey: triggerKey };
+      const next = {
+        ...state, attempts: state.attempts + 1,
+        lastTriggerKey: failing.length || review ? triggerKey : state.lastTriggerKey,
+        sentThreadKeys: [...sentThreadKeys, ...comments.map(threadKey)],
+      };
       if (next.attempts >= 3) {
         next.enabled = false;
         next.stoppedReason = "Stopped after 3 tries";
@@ -642,8 +673,9 @@ export default async function plugin(bb: BbPluginApi) {
           input: [{ type: "text", text, mentions: [] }],
         });
         sentOwners.add(state.ownerThreadId);
-        await saveAutoFix(key, { ...next, lastSentAt: Date.now() });
-        reportAutoFix(key, `Request sent (${next.attempts}/3)`);
+        const sent = { ...next, lastSentAt: Date.now(), lastSentSummary: summary };
+        await saveAutoFix(key, sent);
+        reportAutoFix(key, autoFixLastSendLabel(sent)!);
       } catch (error) {
         await saveAutoFix(key, { ...next, enabled: false, stoppedReason: next.stoppedReason ?? "Send failed; enable to retry" });
         bb.log.warn(`Auto-fix send failed for ${state.url}: ${errorText(error)}`);
@@ -828,6 +860,7 @@ export default async function plugin(bb: BbPluginApi) {
       `[${from}]`,
       `Auto-fix ${item.autoFix.enabled ? autoFixLabel(item.autoFix).replace(/^Auto-fix /, "") : item.autoFix.stoppedReason ?? "off"}`,
       item.autoFix.enabled && item.autoFix.activity ? `[${item.autoFix.activity}]` : "",
+      !item.autoFix.enabled && item.autoFix.lastSentAt !== null ? autoFixLastSendLabel(item.autoFix)! : "",
       status?.title ?? "",
     ]
       .filter((part) => part !== "")

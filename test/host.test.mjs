@@ -43,6 +43,32 @@ test("queued rerun cannot be treated as settled CI", async (t) => {
   assert.deepEqual((await fixture.args()).slice(0, 4), ["api", "graphql", "--hostname", "github.com"]);
 });
 
+test("batched reads include PR authors and aliased first/last review comments for COMMENTED reviews", async (t) => {
+  const node = pr();
+  node.author = { login: "pr-author" };
+  node.reviewDecision = "REVIEW_REQUIRED";
+  node.reviews = { nodes: [] };
+  node.reviewThreads = { nodes: [{
+    id: "thread-1", isResolved: false, isOutdated: false, path: "docs/ai/writing.md", startLine: 164, line: 166,
+    firstComment: { nodes: [{ id: "comment-1", author: { login: "copilot-pull-request-reviewer" }, body: "Changes recommended", url: `${url(1)}#discussion_r1` }] },
+    lastComment: { nodes: [{ id: "comment-2", author: { login: "reviewer" } }] },
+  }] };
+  const fixture = await setup(t, { data: { p0: node, p1: pr(2) } });
+  const { results } = await fixture.call([url(1), url(2)]);
+  assert.equal(results[url(1)].pr.review, "review_required");
+  assert.equal(results[url(1)].pr.authorLogin, "pr-author");
+  assert.deepEqual(results[url(1)].pr.reviewThreads, [{
+    id: "thread-1", isResolved: false, isOutdated: false, path: "docs/ai/writing.md", startLine: 164, line: 166,
+    firstComment: { id: "comment-1", author: "copilot-pull-request-reviewer", body: "Changes recommended", url: `${url(1)}#discussion_r1` },
+    lastComment: { id: "comment-2", author: "reviewer" },
+  }]);
+  const query = (await fixture.args()).at(-1);
+  assert.match(query, /p0: resource/); assert.match(query, /p1: resource/);
+  assert.match(query, /reviewThreads\(first: 50\)/);
+  assert.match(query, /firstComment: comments\(first: 1\)/);
+  assert.match(query, /lastComment: comments\(last: 1\)/);
+});
+
 test("nested GraphQL failure rejects its PR while preserving other aliases", async (t) => {
   const partial = pr();
   partial.commits.nodes[0].commit.statusCheckRollup = null;

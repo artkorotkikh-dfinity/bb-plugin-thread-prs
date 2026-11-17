@@ -386,6 +386,17 @@ const failingStatus = (n = 10, head = "head-1") => ({
   ],
 });
 
+const reviewThread = (change = {}) => ({
+  id: "thread-1", isResolved: false, isOutdated: false,
+  path: "docs/ai/writing.md", startLine: 164, line: 166,
+  firstComment: { id: "comment-1", author: "copilot-pull-request-reviewer", body: "Check this wording. " + "x".repeat(700), url: "https://github.com/o/r/pull/10#discussion_r1" },
+  lastComment: { id: "comment-1", author: "copilot-pull-request-reviewer" },
+  ...change,
+});
+const commentedStatus = (change = {}) => ({
+  ...status(10, "open"), authorLogin: "pr-author", reviewThreads: [reviewThread()], ...change,
+});
+
 async function tick(t, harness) {
   let reachedSleep;
   const sleeping = new Promise((resolve) => { reachedSleep = resolve; });
@@ -551,6 +562,100 @@ test("Auto-fix triggers on changes requested, using the latest review id", async
   env.advance();
   await tick(t, env.harness);
   assert.equal(env.sends.length, 2);
+});
+
+test("Auto-fix handles COMMENTED reviews once per thread and last comment across pushes, reload and re-enable", async (t) => {
+  const env = autoFixSetup(t);
+  let pr = commentedStatus(); // Copilot COMMENTED leaves reviewDecision REVIEW_REQUIRED.
+  env.setPr(pr);
+  await plugin(env.bb);
+  await enable(env.harness);
+  await tick(t, env.harness);
+  assert.equal(env.sends.length, 1);
+  const message = env.sends[0].input[0].text;
+  for (const part of ["docs/ai/writing.md:164-166", "copilot-pull-request-reviewer",
+    reviewThread().firstComment.body.slice(0, 600) + "…", reviewThread().firstComment.url,
+    "Check each comment against the code; Copilot comments are often wrong.",
+    'Fix only the valid ones on "fix/pr-10" and push.', "Don't reply on GitHub or resolve threads; don't merge, close or force-push.",
+    "Reply here with what you fixed and which comments you rejected and why."]) assert.ok(message.includes(part), part);
+  assert.ok(!message.includes("x".repeat(601)), "body is bounded");
+  let state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+  assert.equal(state.lastSentSummary, "1 review comment");
+  assert.match(state.activity, /Sent .* \(1\/3\) · 1 review comment/);
+  assert.match((await env.harness.behavior.runCli(["list", "R"])).stdout, /1 review comment/);
+  pr = { ...pr, headRefOid: "head-2" };
+  env.setPr(pr); env.advance();
+  await tick(t, env.harness);
+  assert.equal(env.sends.length, 1, "push does not replay a comment");
+  const reloaded = await env.harness.lifecycle.reload(plugin);
+  t.after(() => reloaded.harness.lifecycle.dispose());
+  await tick(t, reloaded.harness);
+  assert.equal(env.sends.length, 1, "sent thread keys survive reload");
+  await reloaded.harness.behavior.callRpc("setAutoFix", { threadId: "R", url: url(10), enabled: false });
+  await enable(reloaded.harness);
+  await tick(t, reloaded.harness);
+  assert.equal(env.sends.length, 1, "re-enable keeps thread keys");
+  state = (await list(reloaded.harness)).items.find(item => item.number === 10).autoFix;
+  assert.equal(state.attempts, 0);
+  env.setPr({ ...pr, reviewThreads: [reviewThread({ lastComment: { id: "comment-2", author: "human-reviewer" } })] });
+  env.advance(); await tick(t, reloaded.harness);
+  assert.equal(env.sends.length, 2, "new reviewer comment can trigger again");
+});
+
+for (const change of [
+  { isResolved: true }, { isOutdated: true },
+  { lastComment: { id: "reply-1", author: "PR-Author" } },
+]) {
+  test(`Auto-fix ignores non-actionable review threads: ${JSON.stringify(change)}`, async (t) => {
+    const env = autoFixSetup(t);
+    env.setPr(commentedStatus({ reviewThreads: [reviewThread(change)] }));
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    assert.equal(env.sends.length, 0);
+  });
+}
+
+test("a changes-requested review with inline feedback also dedupes by thread across pushes", async (t) => {
+  const env = autoFixSetup(t);
+  const pr = commentedStatus({ review: "changes_requested", latestChangesRequested: { id: "review-1", author: "alice" } });
+  env.setPr(pr);
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  env.setPr({ ...pr, headRefOid: "head-2" }); env.advance(); await tick(t, env.harness);
+  assert.equal(env.sends.length, 1);
+});
+
+for (const pending of [false, true]) {
+  test(`Auto-fix combines failing checks and new comments in one request (pending=${pending})`, async (t) => {
+    const env = autoFixSetup(t);
+    const pr = commentedStatus(failingStatus());
+    if (pending) { pr.checks.pending = 1; pr.checksComplete = false; }
+    env.setPr(pr);
+    await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1);
+    assert.match(env.sends[0].input[0].text, /Failing check: "unit"/);
+    assert.match(env.sends[0].input[0].text, /Review comment: docs\/ai\/writing.md:164-166/);
+    let state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+    assert.equal(state.attempts, 1);
+    assert.equal(state.lastSentSummary, "2 failing checks · 1 review comment");
+    env.setPr({ ...pr, checks: { ...pr.checks, pending: 0 }, checksComplete: true });
+    env.advance(); await tick(t, env.harness);
+    assert.equal(env.sends.length, 1, "included failures do not replay when CI settles");
+  });
+}
+
+test("Auto-fix shares the three-attempt budget between checks and comments and sends only new threads", async (t) => {
+  const env = autoFixSetup(t);
+  await plugin(env.bb); await enable(env.harness); await tick(t, env.harness);
+  env.setPr(commentedStatus()); env.advance(); await tick(t, env.harness);
+  const second = reviewThread({ id: "thread-2", firstComment: { ...reviewThread().firstComment, author: "alice" }, lastComment: { id: "comment-2", author: "alice" } });
+  env.setPr(commentedStatus({ reviewThreads: [reviewThread(), second] })); env.advance();
+  await tick(t, env.harness);
+  assert.equal(env.sends.length, 3);
+  assert.match(env.sends[2].input[0].text, /by "alice"/);
+  assert.doesNotMatch(env.sends[2].input[0].text, /by "copilot-pull-request-reviewer"/);
+  const state = (await list(env.harness)).items.find(item => item.number === 10).autoFix;
+  assert.equal(state.attempts, 3); assert.equal(state.enabled, false);
+  assert.equal(state.lastSentSummary, "1 review comment");
+  assert.match((await env.harness.behavior.runCli(["list", "R"])).stdout, /Sent .* \(3\/3\) · 1 review comment/);
 });
 
 for (const change of [
