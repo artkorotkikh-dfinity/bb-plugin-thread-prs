@@ -177,7 +177,7 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
     }
   };
   return (
-    <span className="flex shrink-0 items-center gap-1.5">
+    <span className="flex shrink-0 flex-col items-end gap-0.5">
       {failure === null ? null : <span role="alert" title={failure} className="max-w-40 truncate text-destructive-text">{failure}</span>}
       <button
         type="button"
@@ -185,11 +185,15 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
         disabled={mutation.isPending}
         aria-pressed={state.enabled}
         aria-label={`Auto-fix pull request #${item.number}`}
-        title={`Auto-fix → ${state.ownerThreadTitle ?? state.ownerThreadId}`}
+        title={[`Auto-fix → ${state.ownerThreadTitle ?? state.ownerThreadId}`, state.activity].filter(Boolean).join(" · ")}
         className={cn(ACTION_BUTTON_CLASS, state.enabled && "bg-state-active text-foreground")}
       >
         {autoFixLabel(state)}
       </button>
+      {state.enabled && state.activity ? <span role="status" title={state.activity} className="max-w-40 truncate text-xs text-muted-foreground">{state.activity}</span> : null}
+      {state.enabled && state.ownerThreadId !== threadId ? (
+        <span title={state.ownerThreadId} className="max-w-40 truncate text-xs text-muted-foreground">→ {state.ownerThreadTitle ?? state.ownerThreadId}</span>
+      ) : null}
     </span>
   );
 }

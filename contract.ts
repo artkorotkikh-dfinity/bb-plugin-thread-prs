@@ -89,7 +89,7 @@ export const threadPrSchema = z.object({
   /** Where `status` came from: our own gh read, or bb's GitHub PR Status plugin. */
   statusSource: z.enum(["gh", "github-pr-status"]).nullable(),
   fetchedAt: z.number().nullable(),
-  autoFix: autoFixSchema.extend({ ownerThreadTitle: z.string().nullable() }),
+  autoFix: autoFixSchema.extend({ ownerThreadTitle: z.string().nullable(), activity: z.string().nullable() }),
 });
 export type ThreadPr = z.infer<typeof threadPrSchema>;
 

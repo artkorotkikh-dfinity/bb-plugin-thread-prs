@@ -386,6 +386,7 @@ for (const busy of [
     await enable(harness);
     await tick(t, harness);
     assert.equal(sends.length, 0);
+    assert.equal((await list(harness)).items.find((item) => item.number === 10).autoFix.activity, "Waiting for agent");
     threads.R = { ...THREADS.R };
     await tick(t, harness);
     assert.equal(sends.length, 1, "waiting did not consume the trigger");
@@ -622,14 +623,66 @@ test("the background worker gives plugin registration time before its first read
   const env = autoFixSetup(t);
   await plugin(env.bb);
   await enable(env.harness);
+  const reloaded = await env.harness.lifecycle.reload(plugin);
+  t.after(() => reloaded.harness.lifecycle.dispose());
   env.advance();
   const before = env.hostCalls.length;
-  const service = env.harness.behavior.runService("auto-fix");
+  const service = reloaded.harness.behavior.runService("auto-fix");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(env.hostCalls.length, before);
   assert.equal(env.sends.length, 0);
   service.controller.abort();
   await service.done;
+});
+
+test("enabling Auto-fix wakes the running worker without waiting for its two-minute timer", async (t) => {
+  const env = autoFixSetup(t);
+  await plugin(env.bb);
+  let enteredPeriodicSleep;
+  const sleeping = new Promise((resolve) => { enteredPeriodicSleep = resolve; });
+  let sent;
+  const delivered = new Promise((resolve) => { sent = resolve; });
+  env.harness.inspection.sdk.stub("threads.send", async (input) => {
+    env.sends.push(input); sent(); return { ok: true, delivery: "sent" };
+  });
+  const original = globalThis.setTimeout;
+  const timer = t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => {
+    const handle = original(fn, ms === 30_000 ? 0 : ms, ...args);
+    if (ms === 120_000) enteredPeriodicSleep();
+    return handle;
+  });
+  const service = env.harness.behavior.runService("auto-fix");
+  let deadline;
+  try {
+    await sleeping;
+    assert.equal(env.sends.length, 0);
+    await enable(env.harness);
+    await Promise.race([delivered, new Promise((_, reject) => {
+      deadline = original(() => reject(new Error("worker stayed asleep after enabling")), 1000);
+    })]);
+    assert.equal(env.sends.length, 1);
+  } finally {
+    clearTimeout(deadline);
+    service.controller.abort();
+    await service.done;
+    timer.mock.restore();
+  }
+});
+
+test("Auto-fix explains waiting for CI and a green PR", async (t) => {
+  const env = autoFixSetup(t);
+  await plugin(env.bb);
+  const pending = failingStatus();
+  pending.checks.pending = 1;
+  env.setPr(pending);
+  await enable(env.harness);
+  await tick(t, env.harness);
+  assert.equal((await list(env.harness)).items.find((item) => item.number === 10).autoFix.activity, "Waiting for CI");
+  env.advance();
+  env.setPr(status(10, "open"));
+  await tick(t, env.harness);
+  assert.equal((await list(env.harness)).items.find((item) => item.number === 10).autoFix.activity, "No action needed");
+  assert.equal(env.sends.length, 0);
 });
 
 test("a watcher read during candidate activation retries without caching a startup error", async (t) => {

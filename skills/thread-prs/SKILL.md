@@ -19,6 +19,14 @@ that agent to fix the branch and push. The optional thread id selects the list,
 not the owner. `list` includes the Auto-fix state; `--json` includes attempts,
 owner, last trigger, send time and stop reason.
 
+Enabling wakes a check immediately. Enabled rows and `list` also explain their
+activity: waiting for CI, waiting for the agent, no action needed, an already
+requested failure, or unavailable status. If another thread owns Auto-fix, the UI
+shows that target. State is shared per PR: an off/on cycle from another list can
+reselect the owner and resets attempts. Repeating `on` while enabled wakes a check
+without changing owner or attempts. Inspect `bb plugin logs thread-prs` for enable,
+disable, ownership and activity diagnostics.
+
 The background poll runs every two minutes, waits for an idle owner and settled
 checks, skips archived/deleted owners and completed PRs, deduplicates triggers by
 head plus failing checks or latest changes-requested review, and stops after

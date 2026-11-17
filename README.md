@@ -54,7 +54,9 @@ or the first thread that linked the PR when there is no branch source. The optio
 CLI thread id identifies the list containing the PR; it does not override the owner.
 
 While enabled, a background service checks the PR every two minutes, even without
-an open list. The first poll waits 30 seconds for plugin registration. It shares the
+an open list. Enabling Auto-fix wakes that worker immediately; it does not wait for
+the next two-minute poll. On reload, the first automatic poll waits 30 seconds for
+plugin registration. It shares the
 list's machine-scoped cache and batches stale enabled PRs into host calls of up to
 50 PRs per machine. A new failing-check set or changes-requested review
 triggers a short request to the owner: fix the named branch, push, and reply with
@@ -90,6 +92,19 @@ time such as **Sent 12:04 (1/3)**. State is stored per PR in the plugin's
 `bb.storage.kv`, shared across every list containing that PR. Turning it off stops
 future requests; work already sent to an agent continues. The agent uses its
 existing permissions and credentials, so a request does not guarantee a fix.
+
+Each enabled row explains its current activity, such as **Waiting for CI**,
+**Waiting for agent**, **No action needed**, or **Already requested for this commit**.
+If the owner differs from the thread you are viewing, its title appears below the
+toggle. The state is shared between sessions: switching sessions does not move the
+owner, while turning it off and back on selects the owner from that list again and
+resets the attempt budget. Turning an already enabled subscription on through the
+CLI wakes a check without resetting its owner or attempts.
+
+`bb plugin logs thread-prs` records enables, disables, owner IDs, request counts and
+changes in waiting reasons. These diagnostics stay in BB's local plugin log and do
+not include credentials. They apply from this version onward; earlier enable and
+skip decisions were not recorded.
 
 ## Settings
 

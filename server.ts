@@ -18,7 +18,6 @@ import {
   rpcContract,
   THREAD_PRS_TAG,
   truncationText,
-  type AutoFix,
   type PrSource,
   type PrStatus,
   type ThreadPr,
@@ -184,6 +183,20 @@ export default async function plugin(bb: BbPluginApi) {
   const inflight = new Map<string, Promise<void>>();
   const hostReads = new Map<string | null, Promise<unknown>>();
   const autoFix = new Map<string, SavedAutoFix>();
+  const autoFixActivity = new Map<string, string>();
+  let autoFixWake = new AbortController();
+  function requestAutoFixPoll() { autoFixWake.abort(); }
+  async function waitForAutoFix(ms: number, signal: AbortSignal) {
+    const wake = autoFixWake;
+    await sleep(ms, AbortSignal.any([signal, wake.signal]));
+    if (autoFixWake === wake) autoFixWake = new AbortController();
+  }
+  function reportAutoFix(key: string, activity: string) {
+    if (autoFixActivity.get(key) === activity) return;
+    autoFixActivity.set(key, activity);
+    bb.log.info(`Auto-fix ${key}: ${activity}; owner ${autoFix.get(key)?.ownerThreadId ?? "unknown"}`);
+    bb.rpc.experimental_invalidate([THREAD_PRS_TAG]);
+  }
   for (const key of await bb.storage.kv.list(AUTO_FIX_PREFIX)) {
     const parsed = savedAutoFixSchema.safeParse(await bb.storage.kv.get(key));
     const pr = parsed.success ? parsePrUrl(parsed.data.url) : null;
@@ -208,7 +221,7 @@ export default async function plugin(bb: BbPluginApi) {
     return ref.sources.find((source) => source.kind === "branch") ?? ref.sources[0]!;
   }
 
-  function autoFixFor(ref: Ref): AutoFix & { ownerThreadTitle: string | null } {
+  function autoFixFor(ref: Ref): ThreadPr["autoFix"] {
     const owner = ownerOf(ref);
     const saved = autoFix.get(ref.key);
     return {
@@ -217,6 +230,7 @@ export default async function plugin(bb: BbPluginApi) {
         lastTriggerKey: null, lastSentAt: null, stoppedReason: null,
       }),
       ownerThreadTitle: ref.sources.find((source) => source.threadId === (saved?.ownerThreadId ?? owner.threadId))?.threadTitle ?? null,
+      activity: saved?.enabled ? autoFixActivity.get(ref.key) ?? "Waiting for next check" : null,
     };
   }
 
@@ -486,13 +500,17 @@ export default async function plugin(bb: BbPluginApi) {
       // A removed link must never make an existing subscription impossible to stop.
       if (!enabled && key && saved) {
         await saveAutoFix(key, { ...saved, enabled: false, stoppedReason: null });
+        reportAutoFix(key, "Disabled");
         return { ok: true, message: "Auto-fix off." };
       }
       const collected = await collect(threadId);
       const ref = parsed === null ? undefined : collected.refs.find((candidate) => candidate.key === prKey(parsed.repo, parsed.number));
       if (!ref) return { ok: false, message: "That pull request is not listed for this thread." };
       const previous = autoFix.get(ref.key);
-      if (enabled && previous?.enabled) return { ok: true, message: "Auto-fix is already on." };
+      if (enabled && previous?.enabled) {
+        requestAutoFixPoll();
+        return { ok: true, message: "Auto-fix is already on; checking now." };
+      }
       const owner = ownerOf(ref);
       if (enabled) {
         await refreshUrls(ref.hostId, [ref.url], lifecycle.signal);
@@ -514,6 +532,12 @@ export default async function plugin(bb: BbPluginApi) {
         ...(previous ?? { ownerThreadId: owner.threadId, attempts: 0, lastTriggerKey: null, lastSentAt: null, url: ref.url, hostId: null }),
         enabled: false, stoppedReason: null,
       });
+      if (enabled) {
+        // The request stays pending if a poll is running; the next wait consumes it.
+        reportAutoFix(ref.key, "Checking PR");
+        bb.log.info(`Auto-fix enabled for ${ref.key} from ${threadId}; owner ${owner.threadId}; attempt budget reset`);
+        requestAutoFixPoll();
+      }
       return { ok: true, message: `Auto-fix ${enabled ? "on" : "off"}.` };
     });
   }
@@ -521,15 +545,18 @@ export default async function plugin(bb: BbPluginApi) {
   async function pollAutoFix(signal: AbortSignal): Promise<void> {
     const groups = new Map<string, SavedAutoFix[]>();
     const readHosts = new Map<string, string>();
-    for (const state of autoFix.values()) {
+    for (const [key, state] of autoFix) {
       if (!state.enabled) continue;
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
-      if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) continue;
+      if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) {
+        reportAutoFix(key, "Owner unavailable");
+        continue;
+      }
       const collected = await collect(state.ownerThreadId, signal);
       const ref = collected.refs.find((ref) => ref.url === state.url && ref.sources.some((source) => source.threadId === state.ownerThreadId));
-      if (!ref) continue;
+      if (!ref) { reportAutoFix(key, "Waiting for PR link"); continue; }
       const hostId = thread.environmentId ? await hostIdFor(thread.environmentId, signal) : state.hostId;
-      if (hostId === null) continue;
+      if (hostId === null) { reportAutoFix(key, "Machine unavailable"); continue; }
       readHosts.set(state.url, hostId);
       const group = groups.get(hostId) ?? [];
       group.push(state);
@@ -541,7 +568,8 @@ export default async function plugin(bb: BbPluginApi) {
     const sentOwners = new Set<string>();
     for (const [key, state] of autoFix) {
       if (signal.aborted) return;
-      if (!state.enabled || sentOwners.has(state.ownerThreadId)) continue;
+      if (!state.enabled) continue;
+      if (sentOwners.has(state.ownerThreadId)) { reportAutoFix(key, "Waiting for agent"); continue; }
       if (state.attempts >= 3) {
         await saveAutoFix(key, { ...state, enabled: false, stoppedReason: "Stopped after 3 tries" });
         continue;
@@ -550,20 +578,27 @@ export default async function plugin(bb: BbPluginApi) {
       if (!hostId) continue;
       const entry = cache.get(cacheKey(hostId, state.url));
       const pr = entry?.status;
-      if (!entry || entry.error || Date.now() - entry.fetchedAt >= ttlFor(entry) || !pr ||
-          (pr.state !== "open" && pr.state !== "draft") || pr.checks.pending > 0 ||
-          pr.checks.state === "pending" || pr.checksComplete !== true || !pr.headRefOid || !pr.headRefName) continue;
+      if (!entry || entry.error || Date.now() - entry.fetchedAt >= ttlFor(entry) || !pr) {
+        reportAutoFix(key, "GitHub status unavailable"); continue;
+      }
+      if (pr.state !== "open" && pr.state !== "draft") { reportAutoFix(key, "PR completed"); continue; }
+      if (pr.checks.pending > 0 || pr.checks.state === "pending") { reportAutoFix(key, "Waiting for CI"); continue; }
+      if (pr.checksComplete !== true || !pr.headRefOid || !pr.headRefName) {
+        reportAutoFix(key, "Waiting for complete CI data"); continue;
+      }
       const failing = pr.failingChecks ?? [];
       const review = pr.review === "changes_requested" ? pr.latestChangesRequested : null;
-      if (!failing.length && !review) continue;
+      if (!failing.length && !review) { reportAutoFix(key, "No action needed"); continue; }
       // Prefer checks when both fail; include the review in the same request.
       const triggerKey = JSON.stringify(failing.length
         ? [pr.headRefOid, "checks", failing.map((check) => check.name).sort()]
         : [pr.headRefOid, "review", review!.id]);
-      if (triggerKey === state.lastTriggerKey) continue;
+      if (triggerKey === state.lastTriggerKey) { reportAutoFix(key, "Already requested for this commit"); continue; }
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
       if (!thread || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" ||
-          thread.runtime.displayStatus !== "idle" || thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0) continue;
+          thread.runtime.displayStatus !== "idle" || thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0) {
+        reportAutoFix(key, "Waiting for agent"); continue;
+      }
       const text = [
         `[Thread PRs plugin · Auto-fix] Fix ${state.url} on branch ${JSON.stringify(pr.headRefName)}.`,
         ...failing.map((check) => `Failing check: ${JSON.stringify(check.name)} — ${check.detailsUrl ?? `${state.url}/checks`}`),
@@ -585,6 +620,7 @@ export default async function plugin(bb: BbPluginApi) {
         });
         sentOwners.add(state.ownerThreadId);
         await saveAutoFix(key, { ...next, lastSentAt: Date.now() });
+        reportAutoFix(key, `Request sent (${next.attempts}/3)`);
       } catch (error) {
         await saveAutoFix(key, { ...next, enabled: false, stoppedReason: next.stoppedReason ?? "Send failed; enable to retry" });
         bb.log.warn(`Auto-fix send failed for ${state.url}: ${errorText(error)}`);
@@ -595,12 +631,12 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("auto-fix", {
     async start(signal) {
       // Services may start before the candidate plugin's host entry can be called.
-      await sleep(TICK_MS, signal);
+      await waitForAutoFix(TICK_MS, signal);
       while (!signal.aborted) {
         await serializeAutoFix(() => pollAutoFix(signal)).catch((error: unknown) => {
           if (!signal.aborted) bb.log.warn(`Auto-fix poll failed: ${errorText(error)}`);
         });
-        await sleep(AUTO_FIX_MS, signal);
+        await waitForAutoFix(AUTO_FIX_MS, signal);
       }
     },
   });
@@ -694,6 +730,7 @@ export default async function plugin(bb: BbPluginApi) {
       status && (status.state === "open" || status.state === "draft") ? `review ${status.review}` : "",
       `[${from}]`,
       `Auto-fix ${item.autoFix.enabled ? autoFixLabel(item.autoFix).replace(/^Auto-fix /, "") : item.autoFix.stoppedReason ?? "off"}`,
+      item.autoFix.enabled && item.autoFix.activity ? `[${item.autoFix.activity}]` : "",
       status?.title ?? "",
     ]
       .filter((part) => part !== "")
