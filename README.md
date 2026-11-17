@@ -47,9 +47,13 @@ child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
 
 ## Quick actions
 
-Four icon buttons sit at the end of each active PR row, in the composer list and
-context card. Hover or focus a button for its label or the reason it is unavailable.
-The toolbar wraps below the title when space is limited.
+The three-dot menu at the end of each PR row contains quick actions, in both the
+composer list and context card. The menu uses one line per action; hover an action
+for its availability explanation or quota note. Screen readers can access the same description.
+Choose which actions appear in **Plugins → Thread PRs → Settings**, using the four
+**PR menu** switches. All four start enabled; turning all of them off hides the menu.
+These preferences update every list immediately and control menu visibility, not
+GitHub permissions. Auto-fix remains visible beside the menu.
 
 - **View diff** opens the PR's changed files, following the link-opening setting.
   This action remains available on completed PRs.
@@ -139,6 +143,19 @@ not include credentials. They apply from this version onward; earlier enable and
 skip decisions were not recorded.
 
 ## Settings
+
+The **PR menu: View diff**, **PR menu: Re-run failed CI**, **PR menu: Copilot review**
+and **PR menu: Merge** switches independently show or hide those menu items. Their
+keys are `showViewDiffAction`, `showRerunFailedCiAction`, `showCopilotReviewAction`
+and `showMergeAction`; each defaults to `true`. For example:
+
+```bash
+bb plugin config thread-prs set showMergeAction false
+```
+
+Completed PRs offer only View diff. If no enabled action applies to a PR, its menu
+is hidden. Visibility changes apply to future menu entries; an open confirmation
+stays available until dismissed, expired or completed, including while a merge is pending.
 
 `Open pull requests in` (`openPullRequestsIn`): `bb` (default) opens a clicked PR the way
 bb opens any link, following Settings → General → Links; `system` always opens it in the

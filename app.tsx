@@ -1,6 +1,6 @@
 // Thread PRs frontend: a context-row segment after bb's own PR segment, and the
 // same list as a thread context card section when the pane shows the card.
-import { useId, useState, type MouseEvent, type ReactNode } from "react";
+import { useId, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   definePluginApp,
   experimental_Icon as Icon,
@@ -217,12 +217,14 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
 
 function PrActions({ threadId, item }: { threadId: string; item: ThreadPr }) {
   const open = useOpenUrl();
+  const actionsRef = useRef<HTMLSpanElement>(null);
   const active = item.status?.state === "open" || item.status?.state === "draft";
   return (
-    <span className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-0.5" onClick={(event) => event.stopPropagation()}>
+    <span ref={actionsRef} className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-0.5" onClick={(event) => event.stopPropagation()}>
       {item.status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
       {active ? <AutoFixButton threadId={threadId} item={item} /> : null}
-      <PrQuickActions threadId={threadId} item={item} onOpenDiff={open(`${item.url}/files`)} />
+      <PrQuickActions threadId={threadId} item={item} onOpenDiff={open(`${item.url}/files`)}
+        onReturnFocus={() => actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus()} />
     </span>
   );
 }

@@ -176,6 +176,22 @@ export default async function plugin(bb: BbPluginApi) {
       experimental_optionLabels: { all: "All", activeOnly: "Open and draft only" },
       default: "all",
     },
+    showViewDiffAction: {
+      type: "boolean", label: "PR menu: View diff",
+      description: "Show View diff in each PR's three-dot menu.", default: true,
+    },
+    showRerunFailedCiAction: {
+      type: "boolean", label: "PR menu: Re-run failed CI",
+      description: "Show Re-run failed CI. Retrying GitHub Actions jobs can use runner minutes.", default: true,
+    },
+    showCopilotReviewAction: {
+      type: "boolean", label: "PR menu: Copilot review",
+      description: "Show Copilot review. Requests require account eligibility and use Copilot quota.", default: true,
+    },
+    showMergeAction: {
+      type: "boolean", label: "PR menu: Merge",
+      description: "Show Merge. Every merge still requires a fresh confirmation and GitHub readiness checks.", default: true,
+    },
   });
 
   const host = bb.hosts.experimental_client({ contract: hostContract });
