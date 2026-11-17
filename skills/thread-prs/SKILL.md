@@ -65,16 +65,18 @@ and push normally. Use the current base (often `main` after a stacked base PR me
 not the old stack branch. Do not rebase. Reply in the owner thread with what
 conflicted and how it was resolved.
 
-Comment requests include location,
-author, the first 600 characters of the first comment and its URL. They ask the
-agent to validate comments against the code (Copilot can be wrong), fix only valid
-ones on the named branch, push, and report fixes and rejected comments with reasons.
-They forbid GitHub replies and resolving threads; all requests forbid merging,
-closing and force-pushing. The three-attempt limit is shared across trigger kinds;
-explicitly re-enabling resets attempts but keeps sent thread and conflict keys. Tooltips and
-`list` show the last send's purpose, e.g. `Sent 14:02 (1/3) · merge conflict`
-or `Sent 14:02 (1/3) · 1 review comment`.
-See [Auto-fix guardrails](../../README.md#auto-fix).
+Comment requests include the file and line range, the latest comment's author,
+an excerpt of up to 600 characters and its URL. Check the current discussion
+against the code before editing or pushing, then report fixes and skipped feedback.
+Comment requests forbid replying on GitHub or resolving review threads. All
+requests forbid merging, closing and force-pushing.
+
+The three-attempt limit covers all trigger kinds. Re-enabling resets attempts
+and keeps sent thread and conflict keys. If delivery is unconfirmed, re-enable
+Auto-fix to monitor new triggers. Check the owner thread before retrying the
+unconfirmed request manually. Tooltips and `list` show the last send's purpose,
+such as `Sent 14:02 (1/3) · merge conflict`.
+See [Auto-fix guardrails](../../docs/reference.md#auto-fix).
 
 A PR shows up only if it is linked or is an environment's branch PR. When you open or
 push to a PR from another branch, link it so it appears:
