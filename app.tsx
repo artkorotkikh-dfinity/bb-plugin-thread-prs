@@ -365,49 +365,136 @@ function PrList({ threadId, data, hiddenCount, mixedRepos }: {
   );
 }
 
+function SummaryChecks({ status, compact = false }: { status: PrStatus; compact?: boolean }) {
+  const checks = checksText(status);
+  if (compact && status.checks.state === "no_checks") return null;
+  return (
+    <span
+      className={cn("inline-flex shrink-0 items-center gap-1 tabular-nums", checks.text,
+        status.checks.state === "passing" && "text-success-foreground")}
+      aria-label={checks.label}
+    >
+      {checks.icon === null ? (
+        status.checks.state === "pending" ? <Dot className="bg-attention" /> : null
+      ) : <Icon name={checks.icon} className="size-3 shrink-0" aria-hidden />}
+      {compact ? null : (
+        <span className="@max-[28rem]/thread-pr-summary:hidden">
+          {status.checks.state === "passing" ? `${status.checks.passed}/${status.checks.total}` : checks.label}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: ThreadPr; mixedRepos: boolean }) {
+  const open = useOpenUrl();
+  const status = item.status;
+  const state = status === null ? null : STATE[status.state];
+  const active = status?.state === "open" || status?.state === "draft";
+  const review = active && (status.review === "approved" || status.review === "changes_requested" || status.review === "review_requested")
+    ? REVIEW[status.review] : null;
+  const title = status?.title ?? `${item.repo}#${item.number}`;
+  return (
+    <div className="@container/thread-pr-summary min-w-0 flex-1">
+      <div className="flex min-h-6 min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground">
+        <Icon name={state?.icon ?? "GitPullRequest"} className={cn("size-3.5 shrink-0", state?.text)} aria-label={state?.label ?? "Pull request"} />
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={open(item.url)}
+          title={`${item.repo}#${item.number} ${title}`}
+          aria-label={`Open ${item.repo}#${item.number}: ${title}`}
+          className="flex min-w-0 items-baseline gap-1.5 rounded text-foreground no-underline hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span className="shrink-0 tabular-nums">{numberLabel(item, mixedRepos)}</span>
+          <span className="min-w-0 truncate">{title}</span>
+        </a>
+        <span className={cn("flex shrink-0 items-center gap-1.5", status?.checks.state === "no_checks" && "@max-[28rem]/thread-pr-summary:hidden")}>
+          <span aria-hidden>·</span>
+          {status === null ? <span title={item.error ?? undefined}>{item.error ? "Status unavailable" : "Loading status…"}</span> : <SummaryChecks status={status} />}
+        </span>
+        {review === null ? null : (
+          <span className="flex shrink-0 items-center gap-1.5 @max-[40rem]/thread-pr-summary:hidden" data-promptbox-hide-compact="">
+            <span aria-hidden>·</span>
+            <span className={review.text}>{review.label}</span>
+          </span>
+        )}
+        <span className="ml-auto flex shrink-0 items-center gap-0.5">
+          {status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
+          {active ? <AutoFixButton threadId={threadId} item={item} /> : null}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function PrChip({ item, mixedRepos }: { item: ThreadPr; mixedRepos: boolean }) {
+  const open = useOpenUrl();
+  const status = item.status;
+  const description = [
+    `${item.repo}#${item.number}`, status?.title,
+    status === null ? (item.error ? "Status unavailable" : "Loading status…") : STATE[status.state].label,
+    status === null ? null : checksText(status).label,
+    status === null ? null : REVIEW[status.review]?.label ?? "No review",
+    `Auto-fix ${item.autoFix.enabled ? "on" : "off"}`,
+  ].filter(Boolean).join(" · ");
+  return (
+    <Tooltip content={description}>
+      <a
+        href={item.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={open(item.url)}
+        aria-label={`Open ${description}`}
+        className={cn(ACTION_BUTTON_CLASS, "gap-1.5 text-foreground no-underline")}
+      >
+        <Dot className={status === null ? "bg-border" : STATE[status.state].dot} />
+        <span className="tabular-nums">{numberLabel(item, mixedRepos)}</span>
+        {status === null ? null : <SummaryChecks status={status} compact />}
+        {item.autoFix.enabled ? <Icon name="Zap" className="size-3 shrink-0 text-muted-foreground" aria-hidden /> : null}
+      </a>
+    </Tooltip>
+  );
+}
+
 function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadContextSegmentProps) {
-  const { data, hiddenCount, activeOnly } = useThreadPrs(threadId);
+  const { data, hiddenCount, mixedRepos, activeOnly } = useThreadPrs(threadId);
   if (!hasExtras(data)) return null;
-  const dots = data.items.slice(0, 6);
+  if (data.items.length === 1) return <InlinePr threadId={threadId} item={data.items[0]} mixedRepos={mixedRepos} />;
+  const many = data.items.length >= 4;
+  const active = data.items.filter((item) => item.status?.state === "open" || item.status?.state === "draft")
+    .sort((a, b) => b.number - a.number);
+  const merged = data.items.filter((item) => item.status?.state === "merged").length;
+  const closed = data.items.filter((item) => item.status?.state === "closed").length;
   const label = [
     `${data.items.length} ${activeOnly ? "active " : ""}pull requests from this thread and its child threads`,
     ...listNotes(data, hiddenCount),
   ].join(" · ");
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={isExpanded}
-      aria-label={label}
-      title={label}
-      className={cn(
-        "flex min-h-6 min-w-8 cursor-pointer items-center gap-1.5 overflow-hidden rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-        isExpanded && "bg-state-active text-foreground",
-      )}
-    >
-      <Icon name="GitPullRequest" className="size-3.5 shrink-0" aria-hidden />
-      <span className="shrink-0 tabular-nums">{activeOnly ? "Active PRs" : "PRs"} {data.items.length}</span>
-      <span className="flex shrink-0 items-center gap-0.5" data-promptbox-hide-compact="">
-        {dots.map((item) => (
-          <Dot
-            key={item.key}
-            className={
-              item.status === null
-                ? "bg-border"
-                : item.status.checks.state === "failing" && (item.status.state === "open" || item.status.state === "draft")
-                  ? "bg-destructive"
-                  : STATE[item.status.state].dot
-            }
-          />
-        ))}
-      </span>
-    </button>
+    <div className="flex min-h-6 min-w-0 flex-wrap items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
+      {many ? <span className="shrink-0 tabular-nums" title={label}>PRs {data.items.length}</span> : null}
+      {(many ? active.slice(0, 3) : data.items).map((item) => <PrChip key={item.key} item={item} mixedRepos={mixedRepos} />)}
+      {many && active.length > 3 ? <span className="shrink-0 tabular-nums">+{active.length - 3} open</span> : null}
+      {many && merged + closed > 0 ? (
+        <span className="shrink-0 tabular-nums">+{merged + closed} {merged && closed ? "done" : merged ? "merged" : "closed"}</span>
+      ) : null}
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={isExpanded}
+        aria-label={`${isExpanded ? "Collapse" : "Expand"} ${label}`}
+        className={cn("inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", isExpanded && "bg-state-active text-foreground")}
+      >
+        <Icon name={isExpanded ? "ChevronUp" : "ChevronDown"} className="size-3.5" aria-hidden />
+      </button>
+    </div>
   );
 }
 
 function SegmentDetails({ threadId, isExpanded }: ExperimentalThreadContextSegmentProps) {
   const { data, hiddenCount, mixedRepos } = useThreadPrs(threadId);
-  if (!isExpanded || !hasExtras(data)) return null;
+  if (!isExpanded || !hasExtras(data) || data.items.length === 1) return null;
   return (
     <div className="px-1.5 pb-1.5">
       <PrList threadId={threadId} data={data} hiddenCount={hiddenCount} mixedRepos={mixedRepos} />

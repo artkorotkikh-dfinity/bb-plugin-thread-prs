@@ -35,9 +35,23 @@ newest number first inside each.
 
 ## Where it shows
 
-- **Context row above the composer**: a `PRs N` segment right after bb's own PR segment,
-  with one dot per PR. Click it to expand the list. The segment is hidden when the thread's
-  only PR is its own branch PR (bb's segment already shows that one).
+- **Context row above the composer**: right after bb's own PR segment, using the PRs
+  visible under **Completed pull requests**:
+  - **One PR**: inline state icon, linked number and title, checks, and review. Drafts
+    have **Mark ready**; open and draft PRs have **Auto-fix** at the end. There is no
+    expanded list. As space narrows, review hides first, then checks text while its
+    icon stays visible, and the title truncates to fit.
+  - **Two or three PRs**: a linked chip per PR with its state dot, number, checks mark,
+    and a small lightning icon when Auto-fix is on. Each tooltip shows the repository,
+    title, state, checks, review, and Auto-fix state.
+  - **Four or more PRs**: `PRs N`, up to three open or draft chips (newest first),
+    `+K open` for additional active PRs, and a completed count (`+M closed`, `+M merged`,
+    or `+M done` when both are present).
+  A separate chevron expands the full list for two or more PRs. Mixed-repository lists
+  prefix numbers with the repository name. Links follow **Open pull requests in**;
+  modifier clicks keep their normal behavior. Chips and the chevron support keyboard
+  focus. The segment appears only in the banner row and is hidden when the thread's
+  only visible PR is its own branch PR (bb's segment already shows that one).
 - **Thread context card** (when bb shows the card instead of the row): a "Pull requests"
   section with one row per PR.
 
@@ -172,7 +186,7 @@ client. It is not a Plugin SDK API, so a bb release could rename it.
 `Completed pull requests` (`completedPullRequests`): `all` (**All**, default) shows every
 PR; `activeOnly` (**Open and draft only**) hides merged and closed PRs. Entries whose
 status is still loading or unavailable stay visible. The setting updates the composer
-segment, count, dots, expanded list and context card live; visible lists show how many
+segment, count, chips, expanded list and context card live; visible lists show how many
 merged or closed PRs are hidden. The CLI always lists everything. Change it in bb's
 plugin settings or with:
 
