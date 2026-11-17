@@ -56,6 +56,15 @@ Each row: state, `#number`, title, checks, review, where it came from ("This bra
 child thread), and a link to GitHub. Draft PRs get a **Mark ready** button
 (`gh pr ready`). Open and draft rows also have an **Auto-fix** toggle beside it.
 
+Rows, the single-PR summary and context cards show **N unresolved** when there are
+unresolved review conversations. This counts one per review thread, including
+outdated conversations that are still unresolved; replies do not increase the count.
+General PR conversation comments have no resolved state and are excluded. Zero and
+unknown counts stay hidden to keep rows compact. Counts follow the existing status
+refresh schedule. After the first 50 threads, up to ten lightweight pages are read
+for the count; a failed or incomplete read leaves it unknown rather than showing
+a partial number. Auto-fix's first-50-thread policy stays the same.
+
 ## Quick actions
 
 The three-dot menu at the end of each PR row contains quick actions, in both the

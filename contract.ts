@@ -52,6 +52,8 @@ export const prStatusSchema = z.object({
   latestChangesRequested: z.object({ id: z.string(), author: z.string().nullable() }).nullable().optional(),
   authorLogin: z.string().nullable().optional(),
   reviewThreads: z.array(reviewThreadSchema).optional(),
+  /** All unresolved review conversations, including outdated ones; null until a complete read. */
+  unresolvedReviewThreadCount: z.number().int().nonnegative().nullable().optional(),
 });
 export type PrStatus = z.infer<typeof prStatusSchema>;
 

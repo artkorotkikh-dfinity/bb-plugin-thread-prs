@@ -9,6 +9,11 @@ description: List every GitHub pull request this thread and its child threads ma
 descendant threads: Focus Board links plus each environment's current-branch PR,
 deduplicated by `owner/repo#number`. Without a thread id it uses the calling thread.
 
+PR rows show **N unresolved** for unresolved review threads (one per conversation,
+including outdated ones), hiding zero or unknown counts. JSON status exposes
+`unresolvedReviewThreadCount`; `null` or an absent field means unknown. Count-only
+pagination does not expand Auto-fix's first-50-thread policy.
+
 `bb thread-prs ready <pr-url> [thread-id]` marks one listed draft PR ready for review
 (`gh pr ready`). It refuses PRs that are not listed for the thread or not drafts.
 

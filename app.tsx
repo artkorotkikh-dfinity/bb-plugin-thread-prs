@@ -229,6 +229,16 @@ function PrActions({ threadId, item }: { threadId: string; item: ThreadPr }) {
   );
 }
 
+function UnresolvedComments({ count }: { count: number | null | undefined }) {
+  if (count == null || count === 0) return null;
+  return (
+    <span className="shrink-0 tabular-nums" title={`${count} unresolved review ${count === 1 ? "thread" : "threads"}, including outdated conversations`}
+      aria-label={`${count} unresolved review ${count === 1 ? "thread" : "threads"}`}>
+      {count} unresolved
+    </span>
+  );
+}
+
 function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: string | null }) {
   const navigate = useBbNavigate();
   const status = item.status;
@@ -271,6 +281,9 @@ function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: stri
           {review.label}
         </span>,
       );
+    }
+    if (status.unresolvedReviewThreadCount) {
+      parts.push(<UnresolvedComments key="comments" count={status.unresolvedReviewThreadCount} />);
     }
     if (item.error !== null) {
       parts.push(
@@ -417,6 +430,11 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
             <span className={review.text}>{review.label}</span>
           </span>
         )}
+        {status?.unresolvedReviewThreadCount ? (
+          <span className="flex shrink-0 items-center gap-1.5">
+            <span aria-hidden>·</span><UnresolvedComments count={status.unresolvedReviewThreadCount} />
+          </span>
+        ) : null}
         <span className="ml-auto flex shrink-0 items-center gap-0.5">
           {status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
           {active ? <AutoFixButton threadId={threadId} item={item} /> : null}
@@ -510,6 +528,7 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
                 <span>{numberLabel(item, mixedRepos)} {status?.title ?? item.repo}</span>
                 {source === null ? null : <span className="text-muted-foreground">{source.label}</span>}
                 {review === null ? null : <span className={cn("text-xs", review.text)}>{review.label}</span>}
+                <UnresolvedComments count={status?.unresolvedReviewThreadCount} />
                 {item.error === null ? null : (
                   <span title={item.error} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                     <Icon name="AlertTriangle" className="size-3" aria-hidden />

@@ -24,14 +24,102 @@ async function setup(t, payload, code = 0, stderr = "") {
   const dir = await mkdtemp(path.join(tmpdir(), "thread-prs-host-"));
   const response = path.join(dir, "response.json");
   const args = path.join(dir, "args.json");
+  const calls = path.join(dir, "calls.jsonl");
+  const index = path.join(dir, "index");
   await writeFile(response, typeof payload === "string" ? payload : JSON.stringify(payload));
-  await writeFile(path.join(dir, "gh"), `#!/usr/bin/env node\nconst fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(args)}, JSON.stringify(process.argv.slice(2))); process.stdout.write(fs.readFileSync(${JSON.stringify(response)})); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = ${code};\n`, { mode: 0o700 });
+  await writeFile(path.join(dir, "gh"), `#!/usr/bin/env node\nconst fs = require("node:fs"); const args = process.argv.slice(2); fs.writeFileSync(${JSON.stringify(args)}, JSON.stringify(args)); fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args)+"\\n"); const raw=fs.readFileSync(${JSON.stringify(response)},"utf8"); if (${Array.isArray(payload)}) { const file=${JSON.stringify(index)};const i=fs.existsSync(file)?Number(fs.readFileSync(file,"utf8")):0;fs.writeFileSync(file,String(i+1));const step=JSON.parse(raw)[i];if(!step)process.exit(99);process.stdout.write(typeof step.payload==="string"?step.payload:JSON.stringify(step.payload));process.stderr.write(step.stderr??"");process.exitCode=step.code??0; } else { process.stdout.write(raw); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = ${code}; }\n`, { mode: 0o700 });
   const previousPath = process.env.PATH;
   process.env.PATH = `${dir}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${previousPath}`;
   const harness = experimental_createHostEntryHarness(entry);
   t.after(async () => { process.env.PATH = previousPath; await harness.experimental_dispose(); await rm(dir, { recursive: true, force: true }); });
-  return { call: (urls) => harness.experimental_call("fetchPullRequests", { urls }), args: () => readFile(args, "utf8").then(JSON.parse), harness };
+  return { call: (urls) => harness.experimental_call("fetchPullRequests", { urls }), args: () => readFile(args, "utf8").then(JSON.parse), calls: async () => (await readFile(calls,"utf8")).trim().split("\n").map(JSON.parse), harness };
 }
+
+const threadPage = (nodes, hasNextPage = false, endCursor = null) => ({ nodes, pageInfo: { hasNextPage, endCursor } });
+const countedPr = (n, connection) => ({ ...pr(n), reviewThreads: connection });
+
+test("unresolved counts use review conversations, including outdated threads and threads without readable comments", async (t) => {
+  const node = countedPr(1, threadPage([
+    { id:"one", isResolved:false, isOutdated:true },
+    { id:"two", isResolved:false },
+    { id:"three", isResolved:true },
+  ]));
+  const fixture = await setup(t, { data:{ p0:node, p1:countedPr(2,threadPage([])), p2:pr(3) } });
+  const {results} = await fixture.call([url(1),url(2),url(3)]);
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,2);
+  assert.equal(results[url(2)].pr.unresolvedReviewThreadCount,0);
+  assert.equal(results[url(3)].pr.unresolvedReviewThreadCount,null,"missing data is not zero");
+  assert.equal((await fixture.calls()).length,1);
+});
+
+test("unresolved counts continue beyond the initial 50 threads without expanding Auto-fix's thread list",async(t)=>{
+  const first=Array.from({length:50},(_,i)=>({id:`first-${i}`,isResolved:true}));
+  const fixture=await setup(t,[
+    {payload:{data:{p0:countedPr(1,threadPage(first,true,"cursor-50"))}}},
+    {payload:{data:{p0:{reviewThreads:threadPage([{id:"later-1",isResolved:false},{id:"later-2",isResolved:false}])}}}},
+  ]);
+  const {results}=await fixture.call([url(1)]);
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,2);
+  assert.equal(results[url(1)].pr.reviewThreads.length,0,"count-only pages add no actionable comments");
+  assert.match((await fixture.calls())[1].at(-1),/reviewThreads\(first: 100, after: "cursor-50"\)/);
+});
+
+test("a failed count page keeps the count unknown while another PR's paginated count succeeds",async(t)=>{
+  const first=threadPage([{id:"one",isResolved:false}],true,"cursor");
+  const fixture=await setup(t,[
+    {payload:{data:{p0:countedPr(1,first),p1:countedPr(2,first),p2:countedPr(3,threadPage([]))}}},
+    {payload:{data:{p0:null,p1:{reviewThreads:threadPage([{id:"two",isResolved:false}])}},errors:[{path:["p0","reviewThreads"],message:"page unavailable"}]},code:1},
+  ]);
+  const {results}=await fixture.call([url(1),url(2),url(3)]);
+  assert.equal(results[url(1)].ok,true,"CI and Auto-fix data remain usable");
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,null);
+  assert.equal(results[url(2)].pr.unresolvedReviewThreadCount,2);
+  assert.equal(results[url(3)].pr.unresolvedReviewThreadCount,0);
+});
+
+for(const connection of [
+  threadPage([{id:"one",isResolved:false}],true,"cursor"),
+  threadPage([{id:"one",isResolved:"false"}]),
+])test(`incomplete or malformed count pages never produce a partial count: ${JSON.stringify(connection)}`,async(t)=>{
+  const fixture=await setup(t,[
+    {payload:{data:{p0:countedPr(1,threadPage([{id:"first",isResolved:false}],true,"cursor"))}}},
+    {payload:{data:{p0:{reviewThreads:connection}}}},
+  ]);
+  const {results}=await fixture.call([url(1)]);
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,null);
+  assert.equal((await fixture.calls()).length,2);
+});
+
+test("count pagination has a fixed budget and deduplicates thread ids",async(t)=>{
+  const pages=Array.from({length:11},(_,i)=>({payload:{data:{p0:i===0
+    ? countedPr(1,threadPage([{id:"same",isResolved:false}],true,"c0"))
+    : {reviewThreads:threadPage([{id:"same",isResolved:false}],i<10,`c${i}`)}}}}));
+  const fixture=await setup(t,pages);
+  const {results}=await fixture.call([url(1)]);
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,1);
+  assert.equal((await fixture.calls()).length,11);
+});
+
+test("exhausting the count page budget leaves the total unknown",async(t)=>{
+  const pages=Array.from({length:12},(_,i)=>({payload:{data:{p0:i===0
+    ? countedPr(1,threadPage([{id:"first",isResolved:false}],true,"c0"))
+    : {reviewThreads:threadPage([{id:`later-${i}`,isResolved:false}],true,`c${i}`)}}}}));
+  const fixture=await setup(t,pages);
+  const {results}=await fixture.call([url(1)]);
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,null);
+  assert.equal((await fixture.calls()).length,11,"no unbounded pagination");
+});
+
+test("a failed count request preserves PR status without displaying a partial total",async(t)=>{
+  const fixture=await setup(t,[
+    {payload:{data:{p0:countedPr(1,threadPage([{id:"first",isResolved:false}],true,"cursor"))}}},
+    {payload:"not-json",code:1,stderr:"gh: network unavailable"},
+  ]);
+  const {results}=await fixture.call([url(1)]);
+  assert.equal(results[url(1)].ok,true);
+  assert.equal(results[url(1)].pr.unresolvedReviewThreadCount,null);
+  assert.equal(results[url(1)].pr.checks.failed,1);
+});
 
 test("queued rerun cannot be treated as settled CI", async (t) => {
   const fixture = await setup(t, { data: { p0: pr(1, [check(), check({ status: "QUEUED", conclusion: null, startedAt: null })]) } });

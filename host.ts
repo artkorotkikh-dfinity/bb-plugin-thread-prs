@@ -34,7 +34,7 @@ function runGh(args: string[], signal: AbortSignal): Promise<GhOutput> {
 const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefOid headRefName
   mergeable mergeStateStatus baseRefName baseRefOid
   author { login }
-  reviewThreads(first: 50) { nodes {
+  reviewThreads(first: 50) { pageInfo { hasNextPage endCursor } nodes {
     id isResolved isOutdated path line startLine
     firstComment: comments(first: 1) { nodes { id author { login } body url } }
     lastComment: comments(last: 1) { nodes { id author { login } } }
@@ -54,6 +54,61 @@ const obj = (value: unknown): Json | null =>
   typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Json)
     : null;
+
+const reviewThreadPageSchema = z.object({
+  nodes: z.array(z.object({ id: z.string().min(1), isResolved: z.boolean() })),
+  pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() }),
+});
+const unresolvedCount = (threads: Map<string, boolean>) => [...threads.values()].filter((resolved) => !resolved).length;
+
+function completeThreadCount(connection: unknown): number | null {
+  const page = reviewThreadPageSchema.safeParse(connection);
+  return page.success && !page.data.pageInfo.hasNextPage
+    ? unresolvedCount(new Map(page.data.nodes.map((thread) => [thread.id, thread.isResolved])))
+    : null;
+}
+
+/** Count-only pages leave Auto-fix's existing first-50-thread policy unchanged. */
+async function completeThreadCounts(results: Record<string, GhRead>, nodes: Map<string, Json>, signal: AbortSignal) {
+  let pending: { url: string; cursor: string; threads: Map<string, boolean>; cursors: Set<string> }[] = [];
+  for (const [url, node] of nodes) {
+    const page = reviewThreadPageSchema.safeParse(node.reviewThreads);
+    if (page.success && page.data.pageInfo.hasNextPage && page.data.pageInfo.endCursor) {
+      const cursor = page.data.pageInfo.endCursor;
+      pending.push({ url, cursor, threads: new Map(page.data.nodes.map((thread) => [thread.id, thread.isResolved])), cursors: new Set([cursor]) });
+    }
+  }
+  // Bound unusually large conversations and follow the parent host call's cancellation.
+  for (let round = 0; round < 10 && pending.length && !signal.aborted; round++) {
+    const query = `query { ${pending.map((entry, i) => `p${i}: resource(url: ${JSON.stringify(entry.url)}) { ... on PullRequest {
+      reviewThreads(first: 100, after: ${JSON.stringify(entry.cursor)}) { pageInfo { hasNextPage endCursor } nodes { id isResolved } }
+    } }`).join("\n")} }`;
+    const out = await runGh(["api", "graphql", "--hostname", "github.com", "-f", `query=${query}`], signal);
+    let body: Json | null = null;
+    try { body = obj(JSON.parse(out.stdout)); } catch { /* Leave the count unknown on a failed page. */ }
+    const data = obj(body?.data);
+    const errors = Array.isArray(body?.errors) ? body.errors.map(obj) : [];
+    if (!data || (out.code !== 0 && !errors.length)) break;
+    const next: typeof pending = [];
+    pending.forEach((entry, i) => {
+      const alias = `p${i}`;
+      if (errors.some((error) => !Array.isArray(error?.path) || error.path[0] === alias)) return;
+      const page = reviewThreadPageSchema.safeParse(obj(data[alias])?.reviewThreads);
+      if (!page.success) return;
+      for (const thread of page.data.nodes) entry.threads.set(thread.id, thread.isResolved);
+      if (!page.data.pageInfo.hasNextPage) {
+        const result = results[entry.url];
+        if (result?.ok) result.pr.unresolvedReviewThreadCount = unresolvedCount(entry.threads);
+      } else {
+        const cursor = page.data.pageInfo.endCursor;
+        if (!cursor || entry.cursors.has(cursor) || !page.data.nodes.length) return;
+        entry.cursors.add(cursor);
+        next.push({ ...entry, cursor });
+      }
+    });
+    pending = next;
+  }
+}
 
 function toStatus(node: Json): PrStatus | null {
   const number = node.number;
@@ -150,6 +205,7 @@ function toStatus(node: Json): PrStatus | null {
       return { id: review.id, author: typeof author === "string" ? author : null };
     })(),
     authorLogin: typeof obj(node.author)?.login === "string" ? String(obj(node.author)!.login) : null,
+    unresolvedReviewThreadCount: completeThreadCount(node.reviewThreads),
     reviewThreads: ((obj(node.reviewThreads)?.nodes as unknown[] | undefined) ?? []).flatMap((raw) => {
       const thread = obj(raw);
       const first = obj((obj(thread?.firstComment)?.nodes as unknown[] | undefined)?.[0]);
@@ -205,6 +261,7 @@ async function fetchPullRequests(
     for (const url of valid) results[url] = { ok: false, message: firstLine(out.stderr || "gh failed") };
     return results;
   }
+  const successfulNodes = new Map<string, Json>();
   valid.forEach((url, index) => {
     const alias = `p${index}`;
     const node = obj(data[alias]);
@@ -214,6 +271,7 @@ async function fetchPullRequests(
     const status = node === null || error ? null : toStatus(node);
     if (status !== null) {
       results[url] = { ok: true, pr: status };
+      if (node !== null) successfulNodes.set(url, node);
       return;
     }
     results[url] = {
@@ -221,6 +279,7 @@ async function fetchPullRequests(
       message: typeof error?.message === "string" ? error.message : "GitHub returned no pull request",
     };
   });
+  await completeThreadCounts(results, successfulNodes, signal);
   return results;
 }
 
