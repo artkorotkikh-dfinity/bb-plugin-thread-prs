@@ -1,6 +1,6 @@
 // Thread PR Manager frontend: a context-row segment after bb's own PR segment, and the
 // same list as a thread context card section when the pane shows the card.
-import { useId, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
 import {
   definePluginApp,
   experimental_Icon as Icon,
@@ -127,6 +127,36 @@ function sourceText(item: ThreadPr, ownBranchKey: string | null): { label: strin
   return { label: child.threadTitle ?? "Child thread", threadId: child.threadId };
 }
 
+// Below this segment width (20rem) Mark ready and Auto-fix leave the row for the "…" menu, so the
+// bar stays one line on a phone. Matches the `@max-[20rem]` container rules below.
+const COMPACT_WIDTH_PX = 320;
+// The expanded list spans the whole bar, so it goes compact at a wider 30rem.
+const COMPACT_LIST_WIDTH_PX = 480;
+
+/** Tracks whether the element is narrower than `threshold` px. False until measured. */
+function useCompact<T extends HTMLElement>(threshold = COMPACT_WIDTH_PX): [RefObject<T | null>, boolean] {
+  const ref = useRef<T>(null);
+  const [compact, setCompact] = useState(false);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (element === null || typeof ResizeObserver === "undefined") return;
+    const update = () => {
+      const width = element.getBoundingClientRect().width;
+      if (width > 0) setCompact(width < threshold);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [threshold]);
+  return [ref, compact];
+}
+
+function AutoFixOnDot({ item }: { item: ThreadPr }) {
+  if (!item.autoFix.enabled) return null;
+  return <span role="img" aria-label="Auto-fix on" title="Auto-fix on" className="size-1.5 shrink-0 rounded-full bg-success" />;
+}
+
 function Dot({ className }: { className: string }) {
   return <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", className)} />;
 }
@@ -148,7 +178,7 @@ function MarkReadyButton({ threadId, item }: { threadId: string; item: ThreadPr 
   return (
     <span className="flex shrink-0 items-center gap-1.5">
       {failure === null ? null : (
-        <span role="alert" title={failure} className="max-w-40 truncate text-destructive-text">
+        <span role="alert" title={failure} className="max-w-28 truncate text-destructive-text">
           {failure}
         </span>
       )}
@@ -183,7 +213,7 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
   };
   return (
     <span className="flex shrink-0 items-center gap-1.5">
-      {failure === null ? null : <span role="alert" title={failure} className="max-w-40 truncate text-destructive-text">{failure}</span>}
+      {failure === null ? null : <span role="alert" title={failure} className="max-w-28 truncate text-destructive-text">{failure}</span>}
       <Tooltip content={
         <span className="flex flex-col gap-1">
           <span className="font-medium">{state.enabled ? "Auto-fix enabled" : "Auto-fix disabled"}</span>
@@ -215,26 +245,27 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
   );
 }
 
-function PrActions({ threadId, item }: { threadId: string; item: ThreadPr }) {
+function PrActions({ threadId, item, compact = false }: { threadId: string; item: ThreadPr; compact?: boolean }) {
   const open = useOpenUrl();
   const actionsRef = useRef<HTMLSpanElement>(null);
   const active = item.status?.state === "open" || item.status?.state === "draft";
   return (
-    <span ref={actionsRef} className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-0.5" onClick={(event) => event.stopPropagation()}>
-      {item.status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
-      {active ? <AutoFixButton threadId={threadId} item={item} /> : null}
-      <PrQuickActions threadId={threadId} item={item} onOpenDiff={open(`${item.url}/files`)}
+    <span ref={actionsRef} className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-0.5" onClick={(event) => event.stopPropagation()}>
+      {!compact && item.status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
+      {!compact && active ? <AutoFixButton threadId={threadId} item={item} /> : null}
+      <PrQuickActions threadId={threadId} item={item} compact={compact} onOpenDiff={open(`${item.url}/files`)}
         onReturnFocus={() => actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus()} />
     </span>
   );
 }
 
-function UnresolvedComments({ count }: { count: number | null | undefined }) {
+function UnresolvedComments({ count, compact = false }: { count: number | null | undefined; compact?: boolean }) {
   if (count == null || count === 0) return null;
   return (
-    <span className="shrink-0 tabular-nums" title={`${count} unresolved review ${count === 1 ? "thread" : "threads"}, including outdated conversations`}
+    <span className="inline-flex shrink-0 items-center gap-1 tabular-nums" title={`${count} unresolved review ${count === 1 ? "thread" : "threads"}, including outdated conversations`}
       aria-label={`${count} unresolved review ${count === 1 ? "thread" : "threads"}`}>
-      {count} unresolved
+      {compact ? <Icon name="MessageSquare" className="size-3 shrink-0" aria-hidden /> : null}
+      {compact ? count : `${count} unresolved`}
     </span>
   );
 }
@@ -323,11 +354,12 @@ function StatusLine({ item, ownBranchKey }: { item: ThreadPr; ownBranchKey: stri
   );
 }
 
-function PrRow({ threadId, item, ownBranchKey, mixedRepos }: {
+function PrRow({ threadId, item, ownBranchKey, mixedRepos, compact }: {
   threadId: string;
   item: ThreadPr;
   ownBranchKey: string | null;
   mixedRepos: boolean;
+  compact: boolean;
 }) {
   const open = useOpenUrl();
   const status = item.status;
@@ -335,13 +367,13 @@ function PrRow({ threadId, item, ownBranchKey, mixedRepos }: {
   const title = status?.title ?? `${item.repo}#${item.number}`;
   const done = status?.state === "merged" || status?.state === "closed";
   return (
-    <li className={cn("flex flex-wrap items-start gap-x-2 gap-y-0.5 rounded px-1.5 py-1 text-xs hover:bg-state-hover", done && "opacity-70")}>
+    <li className={cn("flex items-start gap-x-2 gap-y-0.5 rounded px-1.5 py-1 text-xs hover:bg-state-hover", compact ? "flex-nowrap" : "flex-wrap", done && "opacity-70")}>
       <Icon
         name={state?.icon ?? "GitPullRequest"}
         className={cn("mt-px size-3.5 shrink-0", state?.text ?? "text-muted-foreground")}
         aria-label={state?.label ?? "Pull request"}
       />
-      <span className="flex min-w-0 flex-1 basis-60 flex-col gap-0.5">
+      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", !compact && "basis-60")}>
         <a
           href={item.url}
           target="_blank"
@@ -352,10 +384,11 @@ function PrRow({ threadId, item, ownBranchKey, mixedRepos }: {
         >
           <span className="shrink-0 tabular-nums">{numberLabel(item, mixedRepos)}</span>
           <span className="min-w-0 truncate">{title}</span>
+          {compact ? <span className="self-center"><AutoFixOnDot item={item} /></span> : null}
         </a>
         <StatusLine item={item} ownBranchKey={ownBranchKey} />
       </span>
-      <PrActions threadId={threadId} item={item} />
+      <PrActions threadId={threadId} item={item} compact={compact} />
     </li>
   );
 }
@@ -366,10 +399,11 @@ function PrList({ threadId, data, hiddenCount, mixedRepos }: {
   hiddenCount: number;
   mixedRepos: boolean;
 }) {
+  const [listRef, compact] = useCompact<HTMLUListElement>(COMPACT_LIST_WIDTH_PX);
   return (
-    <ul aria-label="Pull requests of this thread and its child threads" className="flex max-h-60 flex-col overflow-y-auto">
+    <ul ref={listRef} aria-label="Pull requests of this thread and its child threads" className="flex max-h-60 flex-col overflow-y-auto overflow-x-hidden">
       {data.items.map((item) => (
-        <PrRow key={item.key} threadId={threadId} item={item} ownBranchKey={data.ownBranchKey} mixedRepos={mixedRepos} />
+        <PrRow key={item.key} threadId={threadId} item={item} ownBranchKey={data.ownBranchKey} mixedRepos={mixedRepos} compact={compact} />
       ))}
       {listNotes(data, hiddenCount).map((note) => (
         <li key={note} className="px-1.5 py-1 text-xs text-muted-foreground">{note}</li>
@@ -404,9 +438,10 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
   const review = active && (status.review === "approved" || status.review === "changes_requested" || status.review === "review_requested")
     ? REVIEW[status.review] : null;
   const title = status?.title ?? `${item.repo}#${item.number}`;
+  const [rowRef, compact] = useCompact<HTMLDivElement>();
   return (
-    <div className="@container/thread-pr-summary min-w-0 flex-1">
-      <div className="flex min-h-6 min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground">
+    <div ref={rowRef} className="@container/thread-pr-summary min-w-0 flex-1">
+      <div className="flex min-h-6 min-w-0 flex-nowrap items-center gap-1.5 whitespace-nowrap px-2 text-xs text-muted-foreground">
         <Icon name={state?.icon ?? "GitPullRequest"} className={cn("size-3.5 shrink-0", state?.text)} aria-label={state?.label ?? "Pull request"} />
         <a
           href={item.url}
@@ -415,15 +450,27 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
           onClick={open(item.url)}
           title={`${item.repo}#${item.number} ${title}`}
           aria-label={`Open ${item.repo}#${item.number}: ${title}`}
-          className="flex min-w-0 items-baseline gap-1.5 rounded text-foreground no-underline hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-w-0 items-baseline @max-[20rem]/thread-pr-summary:shrink-0 gap-1.5 rounded text-foreground no-underline hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <span className="shrink-0 tabular-nums">{numberLabel(item, mixedRepos)}</span>
-          <span className="min-w-0 truncate">{title}</span>
+          <span className="min-w-0 truncate @max-[20rem]/thread-pr-summary:sr-only">{title}</span>
         </a>
-        <span className={cn("flex shrink-0 items-center gap-1.5", status?.checks.state === "no_checks" && "@max-[28rem]/thread-pr-summary:hidden")}>
-          <span aria-hidden>·</span>
-          {status === null ? <span title={item.error ?? undefined}>{item.error ? "Status unavailable" : "Loading status…"}</span> : <SummaryChecks status={status} />}
-        </span>
+        {compact ? <AutoFixOnDot item={item} /> : null}
+        {status === null ? (
+          compact ? (
+            item.error ? <span title={item.error} className="inline-flex shrink-0"><Icon name="AlertTriangle" className="size-3" aria-label="Status unavailable" /></span> : null
+          ) : (
+            <span className="flex shrink-0 items-center gap-1.5">
+              <span aria-hidden>·</span>
+              <span title={item.error ?? undefined}>{item.error ? "Status unavailable" : "Loading status…"}</span>
+            </span>
+          )
+        ) : (
+          <span className={cn("flex shrink-0 items-center gap-1.5", status.checks.state === "no_checks" && "@max-[28rem]/thread-pr-summary:hidden")}>
+            <span aria-hidden>·</span>
+            <SummaryChecks status={status} />
+          </span>
+        )}
         {review === null ? null : (
           <span className="flex shrink-0 items-center gap-1.5 @max-[40rem]/thread-pr-summary:hidden" data-promptbox-hide-compact="">
             <span aria-hidden>·</span>
@@ -432,10 +479,10 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
         )}
         {status?.unresolvedReviewThreadCount ? (
           <span className="flex shrink-0 items-center gap-1.5">
-            <span aria-hidden>·</span><UnresolvedComments count={status.unresolvedReviewThreadCount} />
+            <span aria-hidden>·</span><UnresolvedComments count={status.unresolvedReviewThreadCount} compact={compact} />
           </span>
         ) : null}
-        <PrActions threadId={threadId} item={item} />
+        <PrActions threadId={threadId} item={item} compact={compact} />
       </div>
     </div>
   );
@@ -458,7 +505,7 @@ function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadCo
       aria-label={label}
       title={label}
       className={cn(
-        "flex min-h-6 min-w-8 cursor-pointer items-center gap-1.5 overflow-hidden rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "flex min-h-6 min-w-8 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         isExpanded && "bg-state-active text-foreground",
       )}
     >

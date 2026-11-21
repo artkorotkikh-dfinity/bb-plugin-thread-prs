@@ -89,3 +89,38 @@ test("a sole current-branch PR still uses BB's native bar", async t => {
   await slot.behavior.experimental_invalidateRpc(null);
   assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
 });
+
+// A phone-width bar: Mark ready and Auto-fix leave the row for the "…" menu.
+function narrowBar(t, width = 300) {
+  const rect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({ width, height: 24, top: 0, left: 0, right: width, bottom: 24, x: 0, y: 0 });
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} unobserve() {} };
+  t.after(() => { dom.window.HTMLElement.prototype.getBoundingClientRect = rect; delete globalThis.ResizeObserver; });
+}
+
+test("a narrow bar moves Mark ready and Auto-fix into the menu", async t => {
+  narrowBar(t);
+  const pr = item(12, "draft");
+  pr.autoFix.enabled = true;
+  const slot = renderSlot({ component: segment.summary }, props, options(() => data([pr])));
+  t.after(() => slot.lifecycle.unmount());
+  const trigger = await slot.findByRole("button", { name: "Actions for pull request #12" });
+  assert.equal(slot.queryByRole("button", { name: "Mark pull request #12 ready for review" }), null);
+  assert.equal(slot.queryByRole("button", { name: "Auto-fix pull request #12" }), null);
+  assert.ok(slot.getByRole("img", { name: "Auto-fix on" }));
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  await slot.findByRole("menuitem", { name: "Mark ready" });
+  const autoFix = slot.getByRole("menuitemcheckbox", { name: /Auto-fix/ });
+  assert.equal(autoFix.getAttribute("aria-checked"), "true");
+});
+
+test("a narrow bar keeps the menu when every optional action is hidden", async t => {
+  narrowBar(t);
+  const config = options(() => data([item(12)]));
+  for (const key of ["showViewDiffAction", "showRerunFailedCiAction", "showCopilotReviewAction", "showMarkDraftAction", "showMergeAction"]) config.settings[key] = false;
+  const slot = renderSlot({ component: segment.summary }, props, config);
+  t.after(() => slot.lifecycle.unmount());
+  const trigger = await slot.findByRole("button", { name: "Actions for pull request #12" });
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  await slot.findByRole("menuitemcheckbox", { name: /Auto-fix/ });
+});

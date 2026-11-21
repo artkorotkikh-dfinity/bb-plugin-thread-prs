@@ -91,13 +91,30 @@ function MergeConfirmation({ confirmation, onClose, onMerged, returnFocus }: {
   );
 }
 
-export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
-  threadId: string; item: ThreadPr; onOpenDiff: MouseEventHandler<HTMLAnchorElement>; onReturnFocus?: () => void;
+function AutoFixMenuItem({ item, busy, pending, onSelect }: { item: ThreadPr; busy: boolean; pending: boolean; onSelect: () => void }) {
+  const state = item.autoFix;
+  const hint = state.stoppedReason ?? state.activity ?? "Monitor CI, review feedback and merge conflicts";
+  return (
+    <DropdownMenu.CheckboxItem checked={state.enabled} disabled={busy} className={MENU_ITEM} onSelect={onSelect}
+      title={busy && !pending ? "Another action is running" : hint} aria-description={hint}>
+      <Icon name={pending ? "RefreshCw" : "Zap"} className={pending ? "size-3.5 shrink-0 animate-spin motion-reduce:animate-none" : "size-3.5 shrink-0"} aria-hidden />
+      <span className="flex-1">Auto-fix</span>
+      {state.stoppedReason ? <Icon name="AlertTriangle" className="size-3 shrink-0 text-attention-foreground" aria-hidden /> : null}
+      <span className={state.enabled ? "text-success-foreground" : "text-muted-foreground"}>{state.enabled ? "On" : "Off"}</span>
+    </DropdownMenu.CheckboxItem>
+  );
+}
+
+/** `compact`: the bar is too narrow for inline Mark ready and Auto-fix, so the menu carries them. */
+export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus, compact = false }: {
+  threadId: string; item: ThreadPr; onOpenDiff: MouseEventHandler<HTMLAnchorElement>; onReturnFocus?: () => void; compact?: boolean;
 }) {
   const retry = experimental_useRpcMutation({ contract: rpcContract, method: "rerunFailedCi" });
   const copilot = experimental_useRpcMutation({ contract: rpcContract, method: "requestCopilotReview" });
   const draft = experimental_useRpcMutation({ contract: rpcContract, method: "markDraft" });
   const prepare = experimental_useRpcMutation({ contract: rpcContract, method: "prepareMerge" });
+  const ready = experimental_useRpcMutation({ contract: rpcContract, method: "markReady" });
+  const autoFix = experimental_useRpcMutation({ contract: rpcContract, method: "setAutoFix" });
   const pluginId = experimental_usePluginId();
   const settings = useSettings().values;
   const showDiff = settings?.showViewDiffAction !== false;
@@ -110,11 +127,13 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false);
   const active = item.status?.state === "open" || item.status?.state === "draft";
-  const hasItems = showDiff || (active && (showRetry || showCopilot || showMerge)) || (item.status?.state === "open" && showDraft);
+  const showReady = compact && item.status?.state === "draft";
+  const showAutoFix = compact && active;
+  const hasItems = showReady || showAutoFix || showDiff || (active && (showRetry || showCopilot || showMerge)) || (item.status?.state === "open" && showDraft);
   useEffect(() => {
     if (!hasItems) setMenuOpen(false);
   }, [hasItems]);
-  const busy = retry.isPending || copilot.isPending || draft.isPending || prepare.isPending || confirmation !== null;
+  const busy = retry.isPending || copilot.isPending || draft.isPending || prepare.isPending || ready.isPending || autoFix.isPending || confirmation !== null;
   const expectedHead = commitOidSchema.safeParse(item.status?.headRefOid).data;
   const retryReason = busy ? "Another action is running" : item.error ? "Refresh GitHub status first" :
     !expectedHead ? "Loading the current commit" : !item.status?.checks.failed ? "No failed checks to retry" : null;
@@ -122,7 +141,7 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
     item.status?.state === "draft" ? "Mark the draft ready before merging" :
       !item.status?.checksComplete ? "Complete CI data is required before merging" :
         item.status.checks.failed || item.status.checks.pending ? "Wait for passing CI checks" : null;
-  const run = async (action: "retry" | "copilot" | "draft" | "merge") => {
+  const run = async (action: "retry" | "copilot" | "draft" | "merge" | "ready" | "autoFix") => {
     if (busyRef.current || busy) return;
     busyRef.current = true;
     try {
@@ -136,7 +155,11 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
           ? await retry.mutate({ threadId, url: item.url, expectedHead })
           : action === "draft"
             ? await draft.mutate({ threadId, url: item.url })
-            : await copilot.mutate({ threadId, url: item.url });
+            : action === "ready"
+              ? await ready.mutate({ threadId, url: item.url })
+              : action === "autoFix"
+                ? await autoFix.mutate({ threadId, url: item.url, enabled: !item.autoFix.enabled })
+                : await copilot.mutate({ threadId, url: item.url });
         if (result.ok) toast.success(result.message);
         else toast.error(result.message);
       }
@@ -162,6 +185,10 @@ export function PrQuickActions({ threadId, item, onOpenDiff, onReturnFocus }: {
           <DropdownMenu.Content data-bb-plugin-root="" data-bb-plugin={pluginId} align="end" sideOffset={4}
             aria-label={`Actions for pull request #${item.number}`}
             className="z-50 w-48 max-w-[calc(100vw-1rem)] rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md">
+            {showReady ? <MenuAction label="Mark ready" hint="Mark the draft ready for review" icon="GitPullRequestArrow"
+              reason={busy ? "Another action is running" : null} pending={ready.isPending} onSelect={() => void run("ready")} /> : null}
+            {showAutoFix ? <AutoFixMenuItem item={item} busy={busy} pending={autoFix.isPending} onSelect={() => void run("autoFix")} /> : null}
+            {(showReady || showAutoFix) && showDiff ? <DropdownMenu.Separator className="-mx-1 my-1 h-px bg-border" /> : null}
             {showDiff ? <DropdownMenu.Item asChild className={MENU_ITEM}>
               <a href={`${item.url}/files`} target="_blank" rel="noopener noreferrer" onClick={(event) => { onOpenDiff(event); setMenuOpen(false); }}>
                 <Icon name="FileDiff" className="size-3.5 shrink-0" aria-hidden />View diff
