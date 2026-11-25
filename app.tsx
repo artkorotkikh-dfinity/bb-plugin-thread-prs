@@ -245,12 +245,17 @@ function AutoFixButton({ threadId, item }: { threadId: string; item: ThreadPr })
   );
 }
 
-function PrActions({ threadId, item, compact = false }: { threadId: string; item: ThreadPr; compact?: boolean }) {
+function PrActions({ threadId, item, compact = false, className = "ml-auto" }: {
+  threadId: string;
+  item: ThreadPr;
+  compact?: boolean;
+  className?: string;
+}) {
   const open = useOpenUrl();
   const actionsRef = useRef<HTMLSpanElement>(null);
   const active = item.status?.state === "open" || item.status?.state === "draft";
   return (
-    <span ref={actionsRef} className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-0.5" onClick={(event) => event.stopPropagation()}>
+    <span ref={actionsRef} className={cn("flex shrink-0 flex-nowrap items-center justify-end gap-0.5", className)} onClick={(event) => event.stopPropagation()}>
       {!compact && item.status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
       {!compact && active ? <AutoFixButton threadId={threadId} item={item} /> : null}
       <PrQuickActions threadId={threadId} item={item} compact={compact} onOpenDiff={open(`${item.url}/files`)}
@@ -417,8 +422,11 @@ function SummaryChecks({ status }: { status: PrStatus }) {
   return (
     <span
       className={cn("inline-flex shrink-0 items-center gap-1 tabular-nums", checks.text,
-        status.checks.state === "passing" && "text-success-foreground")}
+        status.checks.state === "passing" && "text-success-foreground",
+        status.checks.state === "no_checks" && "@max-[28rem]/thread-pr-summary:hidden")}
+      role="img"
       aria-label={checks.label}
+      title={checks.label}
     >
       {checks.icon === null ? (
         status.checks.state === "pending" ? <Dot className="bg-attention" /> : null
@@ -441,48 +449,39 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
   const [rowRef, compact] = useCompact<HTMLDivElement>();
   return (
     <div ref={rowRef} className="@container/thread-pr-summary min-w-0 flex-1">
-      <div className="flex min-h-6 min-w-0 flex-nowrap items-center gap-1.5 whitespace-nowrap px-2 text-xs text-muted-foreground">
-        <Icon name={state?.icon ?? "GitPullRequest"} className={cn("size-3.5 shrink-0", state?.text)} aria-label={state?.label ?? "Pull request"} />
+      <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs text-muted-foreground">
         <a
           href={item.url}
           target="_blank"
           rel="noopener noreferrer"
           onClick={open(item.url)}
           title={`${item.repo}#${item.number} ${title}`}
-          aria-label={`Open ${item.repo}#${item.number}: ${title}`}
-          className="flex min-w-0 items-baseline @max-[20rem]/thread-pr-summary:shrink-0 gap-1.5 rounded text-foreground no-underline hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          aria-label={`Open ${item.repo}#${item.number}: ${title}${state ? ` (${state.label})` : ""}`}
+          className="group/pr-link -ml-1 flex min-h-10 min-w-0 items-center gap-1.5 rounded px-1 text-foreground no-underline transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
         >
-          <span className="shrink-0 tabular-nums">{numberLabel(item, mixedRepos)}</span>
-          <span className="min-w-0 truncate @max-[20rem]/thread-pr-summary:sr-only">{title}</span>
+          <Icon name={state?.icon ?? "GitPullRequest"} className={cn("size-3.5 shrink-0", state?.text ?? "text-muted-foreground")} aria-hidden />
+          <span className="flex min-w-0 items-baseline gap-1.5">
+            <span className="max-w-24 shrink-0 truncate font-normal tabular-nums text-muted-foreground @max-[14rem]/thread-pr-summary:font-medium">{numberLabel(item, mixedRepos)}</span>
+            <span className="min-w-0 truncate font-medium group-hover/pr-link:underline @max-[14rem]/thread-pr-summary:sr-only">{title}</span>
+          </span>
         </a>
         {compact ? <AutoFixOnDot item={item} /> : null}
         {status === null ? (
           compact ? (
             item.error ? <span title={item.error} className="inline-flex shrink-0"><Icon name="AlertTriangle" className="size-3" aria-label="Status unavailable" /></span> : null
           ) : (
-            <span className="flex shrink-0 items-center gap-1.5">
-              <span aria-hidden>·</span>
-              <span title={item.error ?? undefined}>{item.error ? "Status unavailable" : "Loading status…"}</span>
-            </span>
+            <span className="shrink-0" title={item.error ?? undefined}>{item.error ? "Status unavailable" : "Loading status…"}</span>
           )
         ) : (
-          <span className={cn("flex shrink-0 items-center gap-1.5", status.checks.state === "no_checks" && "@max-[28rem]/thread-pr-summary:hidden")}>
-            <span aria-hidden>·</span>
-            <SummaryChecks status={status} />
-          </span>
+          <SummaryChecks status={status} />
         )}
         {review === null ? null : (
-          <span className="flex shrink-0 items-center gap-1.5 @max-[40rem]/thread-pr-summary:hidden" data-promptbox-hide-compact="">
-            <span aria-hidden>·</span>
-            <span className={review.text}>{review.label}</span>
+          <span className={cn("shrink-0 @max-[40rem]/thread-pr-summary:hidden", review.text)} data-promptbox-hide-compact="">
+            {review.label}
           </span>
         )}
-        {status?.unresolvedReviewThreadCount ? (
-          <span className="flex shrink-0 items-center gap-1.5">
-            <span aria-hidden>·</span><UnresolvedComments count={status.unresolvedReviewThreadCount} compact={compact} />
-          </span>
-        ) : null}
-        <PrActions threadId={threadId} item={item} compact={compact} />
+        <UnresolvedComments count={status?.unresolvedReviewThreadCount} compact={compact} />
+        <PrActions threadId={threadId} item={item} compact={compact} className="empty:hidden" />
       </div>
     </div>
   );
@@ -614,6 +613,24 @@ function CardSection({ threadId }: ExperimentalThreadContextCardProps) {
 }
 
 export default definePluginApp((app) => {
+  app.contentScripts.register({
+    id: "align-changed-files",
+    mount() {
+      const style = document.createElement("style");
+      // BB's Git summary grows to fill its share of the row. Keep that hit area
+      // and align its contents, including the disclosure chevron, at the end.
+      style.textContent = `
+        #thread-prompt-banner-git-toggle {
+          justify-content: flex-end;
+        }
+        #thread-prompt-banner-git-toggle > :last-child {
+          margin-left: 0;
+        }
+      `;
+      document.head.append(style);
+      return () => style.remove();
+    },
+  });
   app.slots.experimental_threadContextSegment({
     id: "thread-prs",
     title: "Pull requests of this thread",
