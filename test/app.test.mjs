@@ -95,7 +95,20 @@ function narrowBar(t, width = 300) {
   const rect = dom.window.HTMLElement.prototype.getBoundingClientRect;
   dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({ width, height: 24, top: 0, left: 0, right: width, bottom: 24, x: 0, y: 0 });
   globalThis.ResizeObserver = class { observe() {} disconnect() {} unobserve() {} };
-  t.after(() => { dom.window.HTMLElement.prototype.getBoundingClientRect = rect; delete globalThis.ResizeObserver; });
+  // The single-PR row goes compact when its full content overflows: the full row
+  // (with Mark ready or Auto-fix inline) doesn't fit this bar, the compact row does.
+  const proto = dom.window.HTMLElement.prototype;
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get: () => width });
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get() {
+    return this.querySelector('[aria-label^="Mark pull request"], [aria-label^="Auto-fix pull request"]') ? width + 100 : width;
+  } });
+  t.after(() => {
+    proto.getBoundingClientRect = rect;
+    // Removing the overrides falls back to jsdom's Element getters.
+    delete proto.clientWidth;
+    delete proto.scrollWidth;
+    delete globalThis.ResizeObserver;
+  });
 }
 
 test("a narrow bar moves Mark ready and Auto-fix into the menu", async t => {
