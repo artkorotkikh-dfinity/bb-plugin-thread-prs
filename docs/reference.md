@@ -16,7 +16,9 @@ Link PRs from provider-internal subagents on Focus Board to include them.
 
 The composer shows a single PR inline or a collapsible list for several.
 When the only PR is the thread's own branch PR, BB's built-in PR badge shows
-it. The committed file count comes from BB's Git plugin.
+it. When the list holds that PR among others, the list replaces BB's badge and
+its Merge action, so each PR has one set of controls. The committed file count
+comes from BB's Git plugin.
 
 **Unresolved** counts review conversations, including outdated ones that
 remain open. General PR comments are excluded. Zero and incomplete counts

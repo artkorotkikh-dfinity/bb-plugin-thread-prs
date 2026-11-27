@@ -320,3 +320,24 @@ test("bb's row confirms a PR our data doesn't count as the branch PR: our segmen
   assert.equal(bbReads(slot), 2);
   assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
 });
+
+// The marker the content script keys on to hide bb's badge and its Merge action.
+const coversBadge = slot => slot.container.querySelector("[data-thread-prs-covers-badge]") !== null;
+
+test("a PR list that holds the PR bb's badge shows stands in for bb's badge", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_cover"),
+    badgeOptions(() => bbRow(12), () => ({ ...data([item(12), item(13)]), ownBranchKey: "o/r#12" })));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "2 pull requests from this thread and its child threads" });
+  await waitFor(() => assert.ok(coversBadge(slot)));
+});
+
+test("a PR list without the PR bb's badge shows leaves bb's badge alone", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_nocover"),
+    badgeOptions(() => bbRow(null), () => data([item(13), item(14)])));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "2 pull requests from this thread and its child threads" });
+  await settle();
+  assert.equal(bbReads(slot), 1);
+  assert.equal(coversBadge(slot), false);
+});
