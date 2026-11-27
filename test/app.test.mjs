@@ -221,3 +221,69 @@ test("the collapsed PR list marks PRs with Copilot concerns", async t => {
   t.after(() => slot.lifecycle.unmount());
   await slot.findByRole("button", { name: "2 pull requests from this thread and its child threads · Copilot has concerns on 1 pull request" });
 });
+
+// bb's PR badge reads bb--github-pr-status's keyed `pullRequests` row for the thread's
+// environment. The harness routes RPC by method name, so `pullRequests` stands in for bb.
+// Each test uses its own environment: re-reads are remembered per (environment, PR).
+const bbRow = number => number === null
+  ? { outcome: "absent" }
+  : { outcome: "available", pullRequest: { number, title: `PR ${number}`, url: `https://github.com/o/r/pull/${number}`, state: "open" } };
+const withEnvironment = id => ({ ...props, environment: { id } });
+const bbReads = slot => slot.inspection.rpcCalls.filter(call => call.method === "pullRequests").length;
+function badgeOptions(rows, getData = () => ({ ...data([item(12)]), ownBranchKey: "o/r#12" })) {
+  const config = options(getData);
+  config.rpc.pullRequests = ({ keys }) => Object.fromEntries(keys.map(key => [key, rows()]));
+  return config;
+}
+const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+
+test("a thread without a branch PR never reads bb's badge row", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_none"), badgeOptions(() => bbRow(null), () => data([item(12)])));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "Actions for pull request #12" });
+  await settle();
+  assert.equal(bbReads(slot), 0);
+});
+
+test("a branch PR that bb's badge already has: one read of bb's row and nothing from us", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_has"), badgeOptions(() => bbRow(12)));
+  t.after(() => slot.lifecycle.unmount());
+  await waitFor(() => assert.equal(bbReads(slot), 1));
+  await settle();
+  assert.equal(bbReads(slot), 1);
+  assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
+});
+
+test("a stale bb badge gets one re-read, and our segment stays out once bb has the PR", async t => {
+  let reads = 0;
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_stale"), badgeOptions(() => bbRow(reads++ === 0 ? null : 12)));
+  t.after(() => slot.lifecycle.unmount());
+  await waitFor(() => assert.equal(bbReads(slot), 2));
+  await settle();
+  assert.equal(bbReads(slot), 2);
+  assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
+});
+
+test("when bb's row still lacks the branch PR after the re-read, our segment shows it until bb has it", async t => {
+  let row = bbRow(null);
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_missing"), badgeOptions(() => row));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "Actions for pull request #12" });
+  assert.equal(bbReads(slot), 2);
+  // bb's change signal invalidates the row by its environment tag; the badge has the PR again.
+  row = bbRow(12);
+  await slot.behavior.experimental_invalidateRpc(["environment:env_missing"], "bb--github-pr-status");
+  await waitFor(() => assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null));
+});
+
+test("bb's row is re-read once per environment and PR, even across remounts", async t => {
+  const first = renderSlot({ component: segment.summary }, withEnvironment("env_once"), badgeOptions(() => bbRow(null)));
+  await first.findByRole("button", { name: "Actions for pull request #12" });
+  assert.equal(bbReads(first), 2);
+  first.lifecycle.unmount();
+  const second = renderSlot({ component: segment.summary }, withEnvironment("env_once"), badgeOptions(() => bbRow(null)));
+  t.after(() => second.lifecycle.unmount());
+  await second.findByRole("button", { name: "Actions for pull request #12" });
+  await settle();
+  assert.equal(bbReads(second), 1);
+});
