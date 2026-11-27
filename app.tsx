@@ -627,6 +627,9 @@ function SegmentSummary(props: ExperimentalThreadContextSegmentProps) {
       : <InlinePr threadId={threadId} item={only} mixedRepos={mixedRepos} />;
   }
   const dots = data.items.slice(0, 6);
+  // The list holds the PR bb's badge shows: it stands in for that badge and its Merge
+  // action (see the content script), so each PR has one set of controls in the row.
+  const coversBadge = data.items.some((item) => badgeKeys.includes(item.key));
   const copilotCount = data.items.filter((item) => item.copilotFollowUp).length;
   const label = [
     `${data.items.length} ${activeOnly ? "active " : ""}pull requests from this thread and its child threads`,
@@ -640,6 +643,7 @@ function SegmentSummary(props: ExperimentalThreadContextSegmentProps) {
       aria-expanded={isExpanded}
       aria-label={label}
       title={label}
+      data-thread-prs-covers-badge={coversBadge ? "" : undefined}
       className={cn(
         "flex min-h-6 min-w-8 cursor-pointer items-center gap-1.5 overflow-hidden whitespace-nowrap rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         isExpanded && "bg-state-active text-foreground",
@@ -766,6 +770,9 @@ export default definePluginApp((app) => {
       // When our single-PR summary shares the row, Git sizes to its own content
       // instead, so it stops splitting the row evenly with the PR, and the PR takes
       // the rest. Git still shrinks and clips when the row is tight.
+      // While our PR list holds the PR bb's badge shows, hide bb's badge and its Merge
+      // action: the list and its expanded rows stand in for them. The selector is the
+      // host's wrapper around bb's plugin, not bb's own markup.
       style.textContent = `
         #thread-prompt-banner-git-toggle {
           justify-content: flex-end;
@@ -775,6 +782,9 @@ export default definePluginApp((app) => {
         }
         section:has([data-thread-prs-summary]) #thread-prompt-banner-git-toggle {
           flex: 0 1 auto;
+        }
+        section:has([data-thread-prs-covers-badge]) [data-bb-plugin="${PR_STATUS_PLUGIN}"] {
+          display: none;
         }
       `;
       document.head.append(style);
