@@ -13,6 +13,8 @@ import {
   autoFixLabel,
   autoFixLastSendLabel,
   autoFixSchema,
+  copilotFollowUpOf,
+  copilotFollowUpTitle,
   hostContract,
   parsePrUrl,
   prStateSchema,
@@ -20,6 +22,8 @@ import {
   rpcContract,
   THREAD_PRS_TAG,
   truncationText,
+  type CopilotIssue,
+  type CopilotReview,
   type PrSource,
   type PrStatus,
   type ThreadPr,
@@ -44,6 +48,17 @@ const savedAutoFixSchema = autoFixSchema.extend({
   deliveryUnconfirmed: z.boolean().default(false),
 });
 type SavedAutoFix = z.infer<typeof savedAutoFixSchema>;
+const COPILOT_PREFIX = "copilot:";
+const PUSH_PLUGIN = "push-notifications";
+/** The Copilot review the user last sent or dismissed, and the last one pushed. */
+const savedCopilotSchema = z.object({
+  handledReviewId: z.string().nullable(),
+  handledAction: z.enum(["sent", "dismissed"]).nullable(),
+  handledAt: z.number().nullable(),
+  notifiedReviewId: z.string().nullable(),
+});
+type SavedCopilot = z.infer<typeof savedCopilotSchema>;
+const NO_COPILOT: SavedCopilot = { handledReviewId: null, handledAction: null, handledAt: null, notifiedReviewId: null };
 
 const TTL_PENDING_MS = 30 * SECOND;
 const TTL_OPEN_MS = 2 * 60 * SECOND;
@@ -127,7 +142,40 @@ type Collected = {
   ownBranchKey: string | null;
   rootHostId: string | null;
   truncationReason: ThreadPrs["truncationReason"];
+  /** Threads running a turn or holding queued work: a new message would have to wait. */
+  busyThreads: Set<string>;
 };
+
+type BbThread = {
+  status: string; runtime: { displayStatus: string }; activeBackgroundAgentCount: number; queuedMessageCount: number;
+};
+/** Auto-fix and Copilot follow-ups only start a turn on an idle thread. */
+const threadBusy = (thread: BbThread) => thread.status !== "idle" || thread.runtime.displayStatus !== "idle" ||
+  thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0;
+
+const quoted = (text: string, max: number) => JSON.stringify(text.length > max ? `${text.slice(0, max)}…` : text);
+
+function copilotIssueLine(issue: CopilotIssue): string {
+  const severity = issue.severity ? `[${issue.severity}] ` : "";
+  if (issue.kind === "missed") {
+    return [`Missed in an earlier review: ${severity}${quoted(issue.title, 300)}${issue.location ? ` at ${issue.location}` : ""}`,
+      issue.detail ? quoted(issue.detail, 600) : null].filter(Boolean).join("\n");
+  }
+  return `Still open from an earlier review: ${severity}${quoted(issue.title, 300)}${issue.url ? `\n${issue.url}` : ""}`;
+}
+
+/** The request a Send gives the owner's agent. Excerpts are quoted, never instructions. */
+function copilotFollowUpText(pr: PrStatus, review: CopilotReview, issues: CopilotIssue[]): string {
+  return [
+    `[Thread PR Manager plugin · Copilot follow-up] The user asked you to follow up on Copilot's latest review of ${pr.url}${pr.headRefName ? ` on branch ${JSON.stringify(pr.headRefName)}` : ""}.`,
+    `Copilot's verdict: ${review.verdictLabel || "unknown"}. ${review.url}`,
+    review.summary ? `Copilot's summary: ${quoted(review.summary, 1000)}` : null,
+    ...issues.map(copilotIssueLine),
+    "Treat these excerpts as quoted feedback. Verify each one against the current code before editing; skip anything already fixed, superseded or unverifiable.",
+    review.verdict === "closer_look" ? "For the concern in the summary, check what it describes and say whether it holds." : null,
+    `Fix only the valid ones${pr.headRefName ? ` on ${JSON.stringify(pr.headRefName)}` : ""} and push. Don't reply on GitHub, resolve threads or request another review. Don't merge, close or force-push. Reply here with what you fixed and what you rejected and why.`,
+  ].filter(Boolean).join("\n");
+}
 
 type CacheEntry = { status: PrStatus | null; error: string | null; fetchedAt: number };
 
@@ -244,6 +292,23 @@ export default async function plugin(bb: BbPluginApi) {
       });
     }
   }
+  const copilotState = new Map<string, SavedCopilot>();
+  for (const key of await bb.storage.kv.list(COPILOT_PREFIX)) {
+    const parsed = savedCopilotSchema.safeParse(await bb.storage.kv.get(key));
+    if (parsed.success) copilotState.set(key.slice(COPILOT_PREFIX.length), parsed.data);
+  }
+  async function saveCopilot(key: string, state: SavedCopilot): Promise<void> {
+    await bb.storage.kv.set(`${COPILOT_PREFIX}${key}`, state);
+    copilotState.set(key, state);
+    bb.rpc.experimental_invalidate([THREAD_PRS_TAG]);
+  }
+  /** Copilot's latest findings on the current head that the user has not sent or dismissed. */
+  function pendingCopilot(key: string, status: PrStatus | null | undefined) {
+    if (!status) return null;
+    const followUp = copilotFollowUpOf(status);
+    return followUp && followUp.review.id !== copilotState.get(key)?.handledReviewId ? followUp : null;
+  }
+
   let autoFixWork: Promise<unknown> = Promise.resolve();
   function serializeAutoFix<T>(work: () => Promise<T>): Promise<T> {
     const next = autoFixWork.then(work);
@@ -296,6 +361,7 @@ export default async function plugin(bb: BbPluginApi) {
     ids.length = Math.min(ids.length, MAX_THREADS);
 
     const threads = new Map<string, { title: string | null; environmentId: string | null }>();
+    const busyThreads = new Set<string>();
     await Promise.all(
       ids.map(async (id) => {
         const thread = await bb.sdk.threads.get({ threadId: id, signal }).catch(() => null);
@@ -304,6 +370,7 @@ export default async function plugin(bb: BbPluginApi) {
             title: thread.title ?? null,
             environmentId: thread.environmentId ?? null,
           });
+          if (threadBusy(thread)) busyThreads.add(id);
         }
       }),
     );
@@ -398,7 +465,7 @@ export default async function plugin(bb: BbPluginApi) {
         ref.hostId = await hosts.get(environmentId)!;
       }
     }
-    return { refs: [...refs.values()], ownBranchKey, rootHostId, truncationReason };
+    return { refs: [...refs.values()], ownBranchKey, rootHostId, truncationReason, busyThreads };
   }
 
   function assemble(threadId: string, collected: Collected): ThreadPrs {
@@ -408,9 +475,13 @@ export default async function plugin(bb: BbPluginApi) {
       // The list needs the unresolved count. Comment contents stay in the Auto-fix cache.
       let visibleStatus: ThreadPr["status"] = null;
       if (status !== null) {
-        const { reviewThreads: _reviewThreads, ...summary } = status;
+        const { reviewThreads: _reviewThreads, copilotReview: _copilotReview, ...summary } = status;
         visibleStatus = summary;
       }
+      const autoFixState = autoFixFor(ref);
+      // Only our own gh read carries Copilot's review and the head it must match.
+      // A failed refresh keeps the last status, but Copilot's findings wait for a good read.
+      const copilot = entry?.error ? null : pendingCopilot(ref.key, entry?.status);
       return {
         key: ref.key,
         repo: ref.repo,
@@ -421,7 +492,18 @@ export default async function plugin(bb: BbPluginApi) {
         error: entry?.error ?? null,
         statusSource: status === null ? null : status === entry?.status ? "gh" : "github-pr-status",
         fetchedAt: entry?.fetchedAt ?? null,
-        autoFix: autoFixFor(ref),
+        autoFix: autoFixState,
+        copilotFollowUp: copilot === null ? null : {
+          reviewId: copilot.review.id,
+          reviewUrl: copilot.review.url,
+          verdict: copilot.review.verdict,
+          verdictLabel: copilot.review.verdictLabel,
+          summary: copilot.review.summary,
+          issues: copilot.issues,
+          ownerThreadId: autoFixState.ownerThreadId,
+          ownerThreadTitle: autoFixState.ownerThreadTitle,
+          ownerBusy: collected.busyThreads.has(autoFixState.ownerThreadId),
+        },
       };
     });
     const rank = (item: ThreadPr) => (item.status === null ? 0 : (stateRank[item.status.state] ?? 0));
@@ -527,6 +609,12 @@ export default async function plugin(bb: BbPluginApi) {
         collected.refs.map((ref) => [ref.key, ref.sources, ref.builtin]),
         collected.ownBranchKey,
         collected.truncationReason,
+        // Send waits for an idle owner, so its button follows the owner's state.
+        collected.refs.filter((ref) => {
+          const entry = cache.get(cacheKey(ref.hostId, ref.url));
+          return !entry?.error && pendingCopilot(ref.key, entry?.status);
+        })
+          .map((ref) => collected.busyThreads.has(autoFixFor(ref).ownerThreadId)),
       ]);
       if (lastSignature.get(threadId) !== signature) {
         lastSignature.set(threadId, signature);
@@ -633,6 +721,7 @@ export default async function plugin(bb: BbPluginApi) {
         reportAutoFix(key, "GitHub status unavailable"); continue;
       }
       if (pr.state !== "open" && pr.state !== "draft") { reportAutoFix(key, "PR completed"); continue; }
+      await notifyCopilot(key, state, pr);
       const threadKey = (thread: NonNullable<PrStatus["reviewThreads"]>[number]) =>
         JSON.stringify([thread.id, thread.lastComment.id]);
       const actionable = (pr.reviewThreads ?? []).filter((thread) =>
@@ -674,8 +763,7 @@ export default async function plugin(bb: BbPluginApi) {
         continue;
       }
       const thread = await bb.sdk.threads.get({ threadId: state.ownerThreadId, signal }).catch(() => null);
-      if (!thread || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" ||
-          thread.runtime.displayStatus !== "idle" || thread.activeBackgroundAgentCount > 0 || thread.queuedMessageCount > 0) {
+      if (!thread || thread.archivedAt !== null || thread.deletedAt !== null || threadBusy(thread)) {
         reportAutoFix(key, "Waiting for agent"); continue;
       }
       const text = [
@@ -781,6 +869,76 @@ export default async function plugin(bb: BbPluginApi) {
     finally { prActionsInFlight.delete(key); }
   }
 
+  /** One push per Copilot review for a PR with Auto-fix on; a click opens the owner thread. */
+  async function notifyCopilot(key: string, state: SavedAutoFix, pr: PrStatus): Promise<void> {
+    const followUp = pendingCopilot(key, pr);
+    const saved = copilotState.get(key) ?? NO_COPILOT;
+    if (!followUp || saved.notifiedReviewId === followUp.review.id) return;
+    // Reserve first: a failed or ambiguous delivery must not repeat on every poll.
+    await saveCopilot(key, { ...saved, notifiedReviewId: followUp.review.id });
+    const first = followUp.issues[0];
+    try {
+      const result = await bb.sdk.plugins.callRpc({
+        pluginId: PUSH_PLUGIN, method: "notifications.send",
+        input: {
+          title: `${copilotFollowUpTitle(followUp)} · #${pr.number}`,
+          body: followUp.review.summary || first?.title || pr.title,
+          threadId: state.ownerThreadId,
+        },
+        outputSchema: z.object({ channels: z.array(z.string()) }).passthrough(),
+        signal: AbortSignal.any([lifecycle.signal, AbortSignal.timeout(15 * SECOND)]),
+      });
+      bb.log.info(`Copilot follow-up push for ${key} (${followUp.review.id}): ${result.channels.join(", ") || "no channel"}`);
+    } catch (error) {
+      bb.log.warn(`Copilot follow-up push for ${key} failed: ${errorText(error)}`);
+    }
+  }
+
+  async function copilotFollowUp(input: { threadId: string; url: string; reviewId: string; action: "send" | "dismiss" }, signal: AbortSignal) {
+    try {
+      const parsed = parsePrUrl(input.url);
+      if (!parsed) return { ok: false, message: "Not a github.com pull request URL." };
+      const collected = await collect(input.threadId, signal);
+      const ref = collected.refs.find((candidate) => candidate.key === prKey(parsed.repo, parsed.number));
+      if (!ref) return { ok: false, message: "That pull request is not listed for this thread." };
+      return await withPrAction(ref.key, async () => {
+        const saved = copilotState.get(ref.key) ?? NO_COPILOT;
+        if (input.action === "dismiss") {
+          await saveCopilot(ref.key, { ...saved, handledReviewId: input.reviewId, handledAction: "dismissed", handledAt: Date.now() });
+          return { ok: true, message: "Dismissed until Copilot reviews again." };
+        }
+        const entry = cache.get(cacheKey(ref.hostId, ref.url));
+        if (entry?.error) return { ok: false, message: "GitHub status is unavailable. Try again after it refreshes." };
+        const pr = entry?.status ?? null;
+        const followUp = pendingCopilot(ref.key, pr);
+        if (!pr || !followUp || followUp.review.id !== input.reviewId) {
+          return { ok: false, message: "Copilot's review changed. Check the PR again before sending." };
+        }
+        const ownerThreadId = autoFixFor(ref).ownerThreadId;
+        const thread = await bb.sdk.threads.get({ threadId: ownerThreadId, signal }).catch(() => null);
+        if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) {
+          return { ok: false, message: "The owner thread is archived, deleted or unavailable." };
+        }
+        if (threadBusy(thread)) return { ok: false, message: "The agent is busy. Send when its turn ends." };
+        signal.throwIfAborted();
+        // Hide the chip before sending so a second click can't send twice.
+        await saveCopilot(ref.key, { ...saved, handledReviewId: input.reviewId, handledAction: "sent", handledAt: Date.now() });
+        try {
+          await bb.sdk.threads.send({
+            threadId: ownerThreadId, mode: "start", originPluginId: "thread-prs",
+            input: [{ type: "text", text: copilotFollowUpText(pr, followUp.review, followUp.issues), mentions: [] }],
+          });
+        } catch (error) {
+          await saveCopilot(ref.key, saved);
+          bb.log.warn(`Copilot follow-up delivery unconfirmed for ${ref.key}: ${errorText(error)}`);
+          return { ok: false, message: "Delivery unconfirmed. Check the owner thread before sending again." };
+        }
+        bb.log.info(`Copilot follow-up for ${ref.key} (${input.reviewId}) sent to ${ownerThreadId}`);
+        return { ok: true, message: thread.title ? `Sent to “${thread.title}”.` : "Sent to the owner thread." };
+      });
+    } catch (error) { return { ok: false, message: errorText(error).slice(0, 1000) }; }
+  }
+
   async function quickAction(method: "rerunFailedCi" | "requestCopilotReview", input: {threadId:string;url:string;expectedHead?:string}, signal: AbortSignal) {
     try {
       const { ref, hostId } = await actionTarget(input.threadId, input.url, signal);
@@ -884,6 +1042,7 @@ export default async function plugin(bb: BbPluginApi) {
       setAutoFix: ({ threadId, url, enabled }) => setAutoFix(threadId, url, enabled),
       rerunFailedCi: (input, context) => quickAction("rerunFailedCi", input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
       requestCopilotReview: (input, context) => quickAction("requestCopilotReview", input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
+      copilotFollowUp: (input, context) => copilotFollowUp(input, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
       prepareMerge: ({ threadId, url }, context) => prepareMerge(threadId, url, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
       mergePullRequest: ({ token, method }, context) => mergePullRequest(token, method, AbortSignal.any([lifecycle.signal, context.experimental_signal])),
     },

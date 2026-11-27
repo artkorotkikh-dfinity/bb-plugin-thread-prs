@@ -19,6 +19,7 @@ import { autoFixLastSendLabel, rpcContract, truncationText, type PrStatus, type 
 import { cn } from "./lib/utils";
 import { Tooltip } from "./lib/tooltip";
 import { PrQuickActions } from "./lib/pr-actions";
+import { CopilotFollowUp } from "./lib/copilot-follow-up";
 
 // Same tokens and icons as bb's GitHub PR Status plugin, so both segments read as siblings.
 const STATE = {
@@ -69,9 +70,12 @@ function listNotes(data: ThreadPrs, hiddenCount: number): string[] {
   ].filter((note): note is string => note !== null);
 }
 
-/** The list adds something only when it holds a PR other than the one bb's own segment shows. */
+/**
+ * The list adds something only when it holds a PR other than the one bb's own segment
+ * shows, or Copilot findings that bb's segment can't show.
+ */
 function hasExtras(data: ThreadPrs | undefined): data is ThreadPrs {
-  return data !== undefined && data.items.some((item) => item.key !== data.ownBranchKey);
+  return data !== undefined && data.items.some((item) => item.key !== data.ownBranchKey || item.copilotFollowUp);
 }
 
 type DesktopBridge = { openExternalUrl?: (url: string) => void };
@@ -289,6 +293,7 @@ function PrActions({ threadId, item, compact = false, className = "ml-auto" }: {
   const active = item.status?.state === "open" || item.status?.state === "draft";
   return (
     <span ref={actionsRef} className={cn("flex shrink-0 flex-nowrap items-center justify-end gap-0.5", className)} onClick={(event) => event.stopPropagation()}>
+      {active ? <CopilotFollowUp threadId={threadId} item={item} compact={compact} openUrl={open} /> : null}
       {!compact && item.status?.state === "draft" ? <MarkReadyButton threadId={threadId} item={item} /> : null}
       {!compact && active ? <AutoFixButton threadId={threadId} item={item} /> : null}
       <PrQuickActions threadId={threadId} item={item} compact={compact} onOpenDiff={open(`${item.url}/files`)}
@@ -528,15 +533,32 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
   );
 }
 
+/** bb's own segment shows the thread's branch PR; this adds only Copilot's findings beside it. */
+function OwnBranchCopilot({ threadId, item }: { threadId: string; item: ThreadPr }) {
+  const open = useOpenUrl();
+  return (
+    <div className="flex shrink-0 items-center px-1">
+      <CopilotFollowUp threadId={threadId} item={item} openUrl={open} />
+    </div>
+  );
+}
+
 function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadContextSegmentProps) {
   const { data, hiddenCount, mixedRepos, activeOnly } = useThreadPrs(threadId);
   if (!hasExtras(data)) return null;
-  if (data.items.length === 1) return <InlinePr threadId={threadId} item={data.items[0]} mixedRepos={mixedRepos} />;
+  if (data.items.length === 1) {
+    const only = data.items[0]!;
+    return only.key === data.ownBranchKey
+      ? <OwnBranchCopilot threadId={threadId} item={only} />
+      : <InlinePr threadId={threadId} item={only} mixedRepos={mixedRepos} />;
+  }
   const dots = data.items.slice(0, 6);
+  const copilotCount = data.items.filter((item) => item.copilotFollowUp).length;
   const label = [
     `${data.items.length} ${activeOnly ? "active " : ""}pull requests from this thread and its child threads`,
+    copilotCount ? `Copilot has concerns on ${copilotCount === 1 ? "1 pull request" : `${copilotCount} pull requests`}` : null,
     ...listNotes(data, hiddenCount),
-  ].join(" · ");
+  ].filter(Boolean).join(" · ");
   return (
     <button
       type="button"
@@ -565,6 +587,12 @@ function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadCo
           />
         ))}
       </span>
+      {copilotCount ? (
+        <span className="inline-flex shrink-0 items-center gap-0.5 tabular-nums text-attention-foreground">
+          <Icon name="Bot" className="size-3.5 shrink-0" aria-hidden />
+          {copilotCount > 1 ? copilotCount : null}
+        </span>
+      ) : null}
     </button>
   );
 }

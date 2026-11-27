@@ -26,6 +26,36 @@ export const reviewThreadSchema = z.object({
   lastComment: z.object({ id: z.string(), author: z.string().nullable(), body: z.string(), url: z.string() }),
 });
 
+export const copilotVerdictSchema = z.enum(["closer_look", "changes", "approval", "approved", "unknown"]);
+export type CopilotVerdict = z.infer<typeof copilotVerdictSchema>;
+
+/** One finding from a Copilot review body. `new` issues also exist as inline threads. */
+export const copilotIssueSchema = z.object({
+  kind: z.enum(["new", "still_open", "missed"]),
+  severity: z.string().nullable(),
+  title: z.string(),
+  /** The inline discussion, for open issues. */
+  url: z.string().nullable(),
+  /** `path:line`, for previously missed issues. */
+  location: z.string().nullable(),
+  detail: z.string().nullable(),
+});
+export type CopilotIssue = z.infer<typeof copilotIssueSchema>;
+
+/** The latest review by Copilot code review, parsed from its body. */
+export const copilotReviewSchema = z.object({
+  id: z.string(),
+  url: z.string(),
+  submittedAt: z.string().nullable(),
+  commitOid: z.string().nullable(),
+  verdict: copilotVerdictSchema,
+  verdictLabel: z.string(),
+  summary: z.string(),
+  issues: z.array(copilotIssueSchema),
+  resolvedCount: z.number().int().nonnegative(),
+});
+export type CopilotReview = z.infer<typeof copilotReviewSchema>;
+
 export const prStatusSchema = z.object({
   number: z.number().int().positive(),
   title: z.string(),
@@ -53,8 +83,29 @@ export const prStatusSchema = z.object({
   reviewThreads: z.array(reviewThreadSchema).optional(),
   /** All unresolved review conversations, including outdated ones; null until a complete read. */
   unresolvedReviewThreadCount: z.number().int().nonnegative().nullable().optional(),
+  /** Copilot's latest review; null when it never reviewed, undefined when not read. */
+  copilotReview: copilotReviewSchema.nullable().optional(),
 });
 export type PrStatus = z.infer<typeof prStatusSchema>;
+
+/**
+ * Copilot's latest review on the current head, when it still has concerns the agent
+ * was not asked about: "Needs a closer look", issues still open from an earlier
+ * review, or issues it missed before. New issues reach the agent as inline threads.
+ */
+export function copilotFollowUpOf(status: PrStatus | null | undefined): { review: CopilotReview; issues: CopilotIssue[] } | null {
+  const review = status?.copilotReview;
+  if (!status || !review || (status.state !== "open" && status.state !== "draft")) return null;
+  if (!status.headRefOid || review.commitOid?.toLowerCase() !== status.headRefOid.toLowerCase()) return null;
+  const issues = review.issues.filter((issue) => issue.kind !== "new");
+  return review.verdict === "closer_look" || issues.length > 0 ? { review, issues } : null;
+}
+
+export function copilotFollowUpTitle(followUp: { review: CopilotReview; issues: CopilotIssue[] }): string {
+  if (followUp.review.verdict === "closer_look") return "Copilot needs a closer look";
+  const count = followUp.issues.length;
+  return `Copilot: ${count} open ${count === 1 ? "issue" : "issues"}`;
+}
 
 /** Only github.com PRs are supported; canonical casing also stabilizes cache keys. */
 export function parsePrUrl(url: string): { repo: string; number: number; url: string } | null {
@@ -108,7 +159,20 @@ export const threadPrSchema = z.object({
   number: z.number().int().positive(),
   url: z.string(),
   sources: z.array(prSourceSchema),
-  status: prStatusSchema.omit({ reviewThreads: true }).nullable(),
+  status: prStatusSchema.omit({ reviewThreads: true, copilotReview: true }).nullable(),
+  /** Copilot findings waiting for the user's Send or Dismiss; null when there are none. */
+  copilotFollowUp: z.object({
+    reviewId: z.string(),
+    reviewUrl: z.string(),
+    verdict: copilotVerdictSchema,
+    verdictLabel: z.string(),
+    summary: z.string(),
+    issues: z.array(copilotIssueSchema),
+    ownerThreadId: z.string(),
+    ownerThreadTitle: z.string().nullable(),
+    /** The owner is running a turn or has queued work, so Send would have to wait. */
+    ownerBusy: z.boolean(),
+  }).nullable().default(null),
   /** Set when GitHub could not be read for this PR; `status` may still hold the last good read. */
   error: z.string().nullable(),
   /** Where `status` came from: our own gh read, or bb's GitHub PR Status plugin. */
@@ -192,6 +256,12 @@ export const rpcContract = defineRpcContract({
     output: actionResultSchema,
   },
   requestCopilotReview: { input: threadPrInputSchema, output: actionResultSchema },
+  copilotFollowUp: {
+    experimental_description:
+      "Send the findings of Copilot's latest review on a listed PR to its owner thread's agent, or dismiss them until Copilot reviews again.",
+    input: threadPrInputSchema.extend({ reviewId: z.string().min(1), action: z.enum(["send", "dismiss"]) }).strict(),
+    output: actionResultSchema,
+  },
   prepareMerge: {
     input: threadPrInputSchema,
     output: z.discriminatedUnion("ok", [

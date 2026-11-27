@@ -91,6 +91,14 @@ confirmation for the exact head and target; it keeps branches and does not bypas
 rules or enqueue a required merge queue. Do not invoke a mutation just to test a
 button. An ambiguous write is never automatically retried: check GitHub first.
 
+A **Copilot** chip appears when Copilot's latest review on the current head says
+"Needs a closer look", or lists issues that are still open or previously missed.
+**Send to agent** and **Dismiss** are the user's decisions: don't call the
+`copilotFollowUp` RPC unless the user asks. A sent request starts with
+`[Thread PR Manager plugin · Copilot follow-up]`. Verify each quoted finding
+against the code, fix only the valid ones, push, and reply with what you fixed and
+what you rejected. See [Copilot follow-ups](../../docs/reference.md#copilot-follow-ups).
+
 The extension settings independently show or hide each item through five **PR menu**
 switches (default on). Keys: `showViewDiffAction`, `showRerunFailedCiAction`,
 `showCopilotReviewAction`, `showMarkDraftAction`, `showMergeAction`. These control visibility, not GitHub

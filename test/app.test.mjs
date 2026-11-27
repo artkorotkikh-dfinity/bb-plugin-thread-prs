@@ -7,7 +7,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http:
 const uiTimers = new Set();
 const schedule = globalThis.setTimeout;
 globalThis.setTimeout = (...args) => { const timer = schedule(...args); uiTimers.add(timer); return timer; };
-for (const name of ["window", "document", "navigator", "HTMLElement", "Element", "Node", "DocumentFragment", "HTMLInputElement", "SVGElement", "ShadowRoot", "MutationObserver", "Event", "CustomEvent", "MouseEvent", "KeyboardEvent", "FocusEvent"]) {
+for (const name of ["window", "document", "navigator", "HTMLElement", "Element", "Node", "DocumentFragment", "HTMLInputElement", "SVGElement", "ShadowRoot", "MutationObserver", "Event", "CustomEvent", "MouseEvent", "KeyboardEvent", "FocusEvent", "NodeFilter"]) {
   Object.defineProperty(globalThis, name, { configurable: true, value: dom.window[name] });
 }
 globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
@@ -136,4 +136,88 @@ test("a narrow bar keeps the menu when every optional action is hidden", async t
   const trigger = await slot.findByRole("button", { name: "Actions for pull request #12" });
   fireEvent.keyDown(trigger, { key: "Enter" });
   await slot.findByRole("menuitemcheckbox", { name: /Auto-fix/ });
+});
+
+const followUp = (change = {}) => ({
+  reviewId: "cr-1", reviewUrl: "https://github.com/o/r/pull/12#pullrequestreview-1",
+  verdict: "closer_look", verdictLabel: "Needs a closer look",
+  summary: "Human assessment is needed because the cache may serve a stale list.",
+  issues: [
+    { kind: "still_open", severity: "Medium", title: "Bound pagination pages", url: "https://github.com/o/r/pull/12#discussion_r11", location: null, detail: null },
+    { kind: "missed", severity: "Low", title: "Dispose of loaders", url: null, location: "src/Detail.svelte:346", detail: "Clearing the loader leaves pagination running." },
+  ],
+  ownerThreadId: "R", ownerThreadTitle: "Root", ownerBusy: false, ...change,
+});
+const withFollowUp = (change) => ({ ...item(12), copilotFollowUp: followUp(change) });
+const followUpOptions = (pr, result = { ok: true, message: "Sent to “Root”." }) => {
+  const config = options(() => data([pr]));
+  config.rpc.copilotFollowUp = () => result;
+  return config;
+};
+
+test("Copilot's open concerns show as a chip whose popover sends them to the agent on request", async t => {
+  const slot = renderSlot({ component: segment.summary }, props, followUpOptions(withFollowUp()));
+  t.after(() => slot.lifecycle.unmount());
+  const chip = await slot.findByRole("button", { name: "Copilot needs a closer look on pull request #12. Show the findings" });
+  assert.match(chip.textContent, /Copilot: closer look/);
+  fireEvent.click(chip);
+  const popover = await slot.findByRole("dialog", { name: "Copilot needs a closer look on pull request #12" });
+  for (const text of ["Needs a closer look", "cache may serve a stale list", "Bound pagination pages", "Still open from an earlier review",
+    "Dispose of loaders", "Missed in an earlier review", "src/Detail.svelte:346", "Send asks the agent in “Root”"]) {
+    assert.ok(popover.textContent.includes(text), text);
+  }
+  assert.equal(slot.getByRole("link", { name: "Bound pagination pages" }).getAttribute("href"), "https://github.com/o/r/pull/12#discussion_r11");
+  assert.equal(slot.inspection.rpcCalls.some(call => call.method === "copilotFollowUp"), false, "nothing is sent on open");
+  fireEvent.click(slot.getByRole("button", { name: "Send to agent" }));
+  await waitFor(() => assert.ok(slot.inspection.rpcCalls.some(call => call.method === "copilotFollowUp")));
+  const call = slot.inspection.rpcCalls.find(entry => entry.method === "copilotFollowUp");
+  assert.deepEqual(call.input, { threadId: "R", url: "https://github.com/o/r/pull/12", reviewId: "cr-1", action: "send" });
+  await waitFor(() => assert.equal(slot.queryByRole("dialog"), null));
+});
+
+test("a busy owner disables Send, and a refused request keeps the findings open", async t => {
+  const slot = renderSlot({ component: segment.summary }, props,
+    followUpOptions(withFollowUp({ ownerBusy: true, verdict: "changes", verdictLabel: "Changes recommended" }), { ok: false, message: "Copilot's review changed. Check the PR again before sending." }));
+  t.after(() => slot.lifecycle.unmount());
+  fireEvent.click(await slot.findByRole("button", { name: "Copilot: 2 open issues on pull request #12. Show the findings" }));
+  await slot.findByRole("dialog");
+  const send = slot.getByRole("button", { name: "Send to agent" });
+  assert.equal(send.disabled, true);
+  assert.ok(slot.getByText("The agent is busy. Send when its turn ends."));
+  fireEvent.click(slot.getByRole("button", { name: "Dismiss" }));
+  const alert = await slot.findByRole("alert");
+  assert.match(alert.textContent, /review changed/);
+  assert.ok(slot.getByRole("dialog"));
+});
+
+test("a narrow bar keeps the Copilot chip as an icon and a count", async t => {
+  narrowBar(t);
+  const slot = renderSlot({ component: segment.summary }, props,
+    followUpOptions(withFollowUp({ verdict: "changes", verdictLabel: "Changes recommended" })));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "Actions for pull request #12" });
+  const chip = slot.getByRole("button", { name: "Copilot: 2 open issues on pull request #12. Show the findings" });
+  assert.equal(chip.textContent, "2");
+});
+
+test("PRs without Copilot concerns show no chip", async t => {
+  const slot = renderSlot({ component: segment.summary }, props, options(() => data([item(12)])));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "Actions for pull request #12" });
+  assert.equal(slot.queryByRole("button", { name: /Copilot/ }), null);
+});
+
+test("a sole current-branch PR with Copilot concerns adds only the chip beside BB's bar", async t => {
+  const config = followUpOptions(withFollowUp());
+  config.rpc.threadPullRequests = () => ({ ...data([withFollowUp()]), ownBranchKey: "o/r#12" });
+  const slot = renderSlot({ component: segment.summary }, props, config);
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "Copilot needs a closer look on pull request #12. Show the findings" });
+  assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
+});
+
+test("the collapsed PR list marks PRs with Copilot concerns", async t => {
+  const slot = renderSlot({ component: segment.summary }, props, options(() => data([withFollowUp(), item(13)])));
+  t.after(() => slot.lifecycle.unmount());
+  await slot.findByRole("button", { name: "2 pull requests from this thread and its child threads · Copilot has concerns on 1 pull request" });
 });
