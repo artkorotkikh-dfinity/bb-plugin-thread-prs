@@ -17,6 +17,8 @@ import {
   copilotFollowUpTitle,
   hostContract,
   parsePrUrl,
+  prKey,
+  PR_STATUS_PLUGIN,
   prStateSchema,
   reviewStateSchema,
   rpcContract,
@@ -33,7 +35,6 @@ import {
 } from "./contract";
 
 const FOCUS_BOARD = "focus-board";
-const PR_STATUS_PLUGIN = "bb--github-pr-status";
 const MAX_THREADS = 200;
 const MAX_PRS = 50;
 
@@ -65,7 +66,6 @@ const TTL_OPEN_MS = 2 * 60 * SECOND;
 const TTL_DONE_MS = 15 * 60 * SECOND;
 const TTL_ERROR_MS = 60 * SECOND;
 
-const prKey = (repo: string, number: number) => `${repo.toLowerCase()}#${number}`;
 const cacheKey = (hostId: string | null, url: string) => JSON.stringify([hostId, url]);
 
 // Only the part of Focus Board's link record we read; anything else is ignored.

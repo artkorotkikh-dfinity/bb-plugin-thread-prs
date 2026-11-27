@@ -1,11 +1,12 @@
 // Thread PR Manager frontend: a context-row segment after bb's own PR segment, and the
 // same list as a thread context card section when the pane shows the card.
-import { useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
 import {
   definePluginApp,
   experimental_Icon as Icon,
   experimental_THREAD_INFO_SECTION_GROUPS as SECTION_GROUPS,
   experimental_ThreadContextCardRow as ThreadContextCardRow,
+  experimental_useRpcKeyedQuery,
   experimental_useRpcMutation,
   experimental_useRpcQuery,
   experimental_useThreadContextKind,
@@ -15,7 +16,17 @@ import {
   type ExperimentalThreadContextSegmentInput,
   type ExperimentalThreadContextSegmentProps,
 } from "@get-bb/plugin-sdk/app";
-import { autoFixLastSendLabel, rpcContract, truncationText, type PrStatus, type ThreadPr, type ThreadPrs } from "./contract";
+import {
+  autoFixLastSendLabel,
+  PR_STATUS_PLUGIN,
+  prStatusContract,
+  prStatusRowKey,
+  rpcContract,
+  truncationText,
+  type PrStatus,
+  type ThreadPr,
+  type ThreadPrs,
+} from "./contract";
 import { cn } from "./lib/utils";
 import { Tooltip } from "./lib/tooltip";
 import { PrQuickActions } from "./lib/pr-actions";
@@ -72,10 +83,63 @@ function listNotes(data: ThreadPrs, hiddenCount: number): string[] {
 
 /**
  * The list adds something only when it holds a PR other than the one bb's own segment
- * shows, or Copilot findings that bb's segment can't show.
+ * shows, or Copilot findings that bb's segment can't show. While bb's badge lacks the
+ * branch PR (`badgeHasOwn` false), that PR counts as one bb doesn't show.
  */
-function hasExtras(data: ThreadPrs | undefined): data is ThreadPrs {
-  return data !== undefined && data.items.some((item) => item.key !== data.ownBranchKey || item.copilotFollowUp);
+function hasExtras(data: ThreadPrs | undefined, badgeHasOwn = true): data is ThreadPrs {
+  return data !== undefined
+    && data.items.some((item) => item.key !== data.ownBranchKey || !badgeHasOwn || item.copilotFollowUp);
+}
+
+// bb's page re-reads its PR badge when bb's server signals a change, and a page hidden
+// at that moment misses the signal, so a PR opened at the end of a turn can stay off the
+// badge until a reload. One re-read per (environment, PR) for the page's lifetime,
+// shared by every mounted hook.
+const badgeRereads = new Map<string, Promise<void>>();
+const settledBadgeRereads = new Set<string>();
+
+/**
+ * Whether bb's badge has the thread's branch PR, so our segment can leave that PR out.
+ * When bb's row lacks it, ask bb's store to re-read the row once; the badge reads the
+ * same store. If the row still lacks the PR after that read, return false so our segment
+ * shows it, until the row gets it.
+ */
+function useBadgeHasBranchPr(environmentId: string | null, ownBranchKey: string | null): boolean {
+  const watched = ownBranchKey === null ? null : environmentId;
+  const pair = watched === null ? null : `${watched} ${ownBranchKey}`;
+  const { data, refetchKeys } = experimental_useRpcKeyedQuery({
+    pluginId: PR_STATUS_PLUGIN,
+    contract: prStatusContract,
+    method: "pullRequests",
+    keys: watched === null ? [] : [watched],
+    enabled: watched !== null,
+  });
+  const row = watched === null ? undefined : data?.[watched];
+  // An unloaded row is no answer yet: change nothing until bb's store has one.
+  const missing = row !== undefined && prStatusRowKey(row) !== ownBranchKey;
+  const [settled, setSettled] = useState<string | null>(null);
+  useEffect(() => {
+    if (!missing || watched === null || pair === null) return;
+    let reread = badgeRereads.get(pair);
+    if (reread === undefined) {
+      reread = refetchKeys([watched])
+        .catch(() => {})
+        .then(() => { settledBadgeRereads.add(pair); });
+      badgeRereads.set(pair, reread);
+    }
+    let live = true;
+    void reread.then(() => { if (live) setSettled(pair); });
+    return () => { live = false; };
+  }, [missing, watched, pair, refetchKeys]);
+  return !(missing && pair !== null && (settled === pair || settledBadgeRereads.has(pair)));
+}
+
+/** The context row's PRs, and whether bb's badge already shows the branch PR. */
+function useSegmentPrs({ threadId, environment }: ExperimentalThreadContextSegmentInput) {
+  const prs = useThreadPrs(threadId);
+  const own = prs.data?.items.find((item) => item.key === prs.data?.ownBranchKey);
+  const badgeHasOwn = useBadgeHasBranchPr(environment?.id ?? null, own?.key ?? null);
+  return { ...prs, badgeHasOwn };
 }
 
 type DesktopBridge = { openExternalUrl?: (url: string) => void };
@@ -543,12 +607,13 @@ function OwnBranchCopilot({ threadId, item }: { threadId: string; item: ThreadPr
   );
 }
 
-function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadContextSegmentProps) {
-  const { data, hiddenCount, mixedRepos, activeOnly } = useThreadPrs(threadId);
-  if (!hasExtras(data)) return null;
+function SegmentSummary(props: ExperimentalThreadContextSegmentProps) {
+  const { threadId, isExpanded, onToggle } = props;
+  const { data, hiddenCount, mixedRepos, activeOnly, badgeHasOwn } = useSegmentPrs(props);
+  if (!hasExtras(data, badgeHasOwn)) return null;
   if (data.items.length === 1) {
     const only = data.items[0]!;
-    return only.key === data.ownBranchKey
+    return only.key === data.ownBranchKey && badgeHasOwn
       ? <OwnBranchCopilot threadId={threadId} item={only} />
       : <InlinePr threadId={threadId} item={only} mixedRepos={mixedRepos} />;
   }
@@ -597,9 +662,10 @@ function SegmentSummary({ threadId, isExpanded, onToggle }: ExperimentalThreadCo
   );
 }
 
-function SegmentDetails({ threadId, isExpanded }: ExperimentalThreadContextSegmentProps) {
-  const { data, hiddenCount, mixedRepos } = useThreadPrs(threadId);
-  if (!isExpanded || !hasExtras(data) || data.items.length === 1) return null;
+function SegmentDetails(props: ExperimentalThreadContextSegmentProps) {
+  const { threadId, isExpanded } = props;
+  const { data, hiddenCount, mixedRepos, badgeHasOwn } = useSegmentPrs(props);
+  if (!isExpanded || !hasExtras(data, badgeHasOwn) || data.items.length === 1) return null;
   return (
     <div className="px-1.5 pb-1.5">
       <PrList threadId={threadId} data={data} hiddenCount={hiddenCount} mixedRepos={mixedRepos} />
@@ -607,10 +673,10 @@ function SegmentDetails({ threadId, isExpanded }: ExperimentalThreadContextSegme
   );
 }
 
-function useSegmentVisible({ threadId }: ExperimentalThreadContextSegmentInput): boolean {
+function useSegmentVisible(input: ExperimentalThreadContextSegmentInput): boolean {
   const kind = experimental_useThreadContextKind();
-  const { data } = useThreadPrs(threadId);
-  return kind === "banner" && hasExtras(data);
+  const { data, badgeHasOwn } = useSegmentPrs(input);
+  return kind === "banner" && hasExtras(data, badgeHasOwn);
 }
 
 function CardSection({ threadId }: ExperimentalThreadContextCardProps) {

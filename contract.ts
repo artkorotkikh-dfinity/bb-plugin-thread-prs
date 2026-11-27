@@ -117,6 +117,34 @@ export function parsePrUrl(url: string): { repo: string; number: number; url: st
   return { repo, number, url: `https://github.com/${repo}/pull/${number}` };
 }
 
+export const prKey = (repo: string, number: number) => `${repo.toLowerCase()}#${number}`;
+
+/** bb's bundled GitHub PR Status plugin: it owns the PR badge for each environment's branch. */
+export const PR_STATUS_PLUGIN = "bb--github-pr-status";
+
+/**
+ * bb's keyed `pullRequests` read, as the page reads it for bb's own badge. The page keeps
+ * one store per plugin and method, so a read through this contract refreshes bb's badge
+ * too. The store takes its tags from the contract of the first hook that reads it, so
+ * keyTags must match bb's, or bb's change signal would stop reaching the badge.
+ */
+export const prStatusContract = defineRpcContract({
+  pullRequests: {
+    input: z.object({ keys: z.array(z.string().min(1)).min(1).max(200) }).strict(),
+    output: z.record(z.string(), z.unknown()),
+    keyTags: (environmentId) => [`environment:${environmentId}`],
+  },
+});
+
+/** The PR key of a bb `pullRequests` row, or null when the row has no github.com PR. */
+export function prStatusRowKey(row: unknown): string | null {
+  const parsed = z
+    .object({ outcome: z.literal("available"), pullRequest: z.object({ url: z.string() }) })
+    .safeParse(row);
+  const pr = parsed.success ? parsePrUrl(parsed.data.pullRequest.url) : null;
+  return pr === null ? null : prKey(pr.repo, pr.number);
+}
+
 export const autoFixSchema = z.object({
   enabled: z.boolean(),
   ownerThreadId: z.string(),
