@@ -152,6 +152,39 @@ function useCompact<T extends HTMLElement>(threshold = COMPACT_WIDTH_PX): [RefOb
   return [ref, compact];
 }
 
+/**
+ * Goes compact when the full row overflows its box, and back once the box is as
+ * wide as the full row needed. Width alone can't tell, because what the row needs
+ * depends on its content (Mark ready, Auto-fix, unresolved count).
+ */
+function useFitsCompact<T extends HTMLElement>(): [RefObject<T | null>, boolean] {
+  const ref = useRef<T>(null);
+  const [compact, setCompact] = useState(false);
+  const needed = useRef(0);
+  const check = () => {
+    const element = ref.current;
+    if (element === null || element.clientWidth === 0) return;
+    if (!compact) {
+      if (element.scrollWidth > element.clientWidth + 1) {
+        needed.current = element.scrollWidth;
+        setCompact(true);
+      }
+    } else if (element.clientWidth >= needed.current) {
+      setCompact(false);
+    }
+  };
+  // Runs after every render: new status data can widen the row without resizing it.
+  useLayoutEffect(() => {
+    check();
+    const element = ref.current;
+    if (element === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(check);
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+  return [ref, compact];
+}
+
 function AutoFixOnDot({ item }: { item: ThreadPr }) {
   if (!item.autoFix.enabled) return null;
   return <span role="img" aria-label="Auto-fix on" title="Auto-fix on" className="size-1.5 shrink-0 rounded-full bg-success" />;
@@ -446,10 +479,12 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
   const review = active && (status.review === "approved" || status.review === "changes_requested" || status.review === "review_requested")
     ? REVIEW[status.review] : null;
   const title = status?.title ?? `${item.repo}#${item.number}`;
-  const [rowRef, compact] = useCompact<HTMLDivElement>();
+  const [rowRef, compact] = useFitsCompact<HTMLDivElement>();
   return (
-    <div ref={rowRef} className="@container/thread-pr-summary min-w-0 flex-1">
-      <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs text-muted-foreground">
+    // Takes the row space bb's Git toggle leaves (see the content script below),
+    // down to a floor that still fits the compact row.
+    <div data-thread-prs-summary="" className="@container/thread-pr-summary min-w-44 flex-1">
+      <div ref={rowRef} className="flex min-w-0 items-center gap-1.5 whitespace-nowrap px-2 text-xs text-muted-foreground">
         <a
           href={item.url}
           target="_blank"
@@ -457,12 +492,18 @@ function InlinePr({ threadId, item, mixedRepos }: { threadId: string; item: Thre
           onClick={open(item.url)}
           title={`${item.repo}#${item.number} ${title}`}
           aria-label={`Open ${item.repo}#${item.number}: ${title}${state ? ` (${state.label})` : ""}`}
-          className="group/pr-link -ml-1 flex min-h-10 min-w-0 items-center gap-1.5 rounded px-1 text-foreground no-underline transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          // No min-w-0 here: the link may shrink only down to icon + number, so the
+          // hover and focus box always wraps them. Only the title gives up width.
+          className="group/pr-link -ml-1 flex min-h-10 items-center gap-1.5 rounded px-1 text-foreground no-underline transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
         >
           <Icon name={state?.icon ?? "GitPullRequest"} className={cn("size-3.5 shrink-0", state?.text ?? "text-muted-foreground")} aria-hidden />
-          <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="flex items-baseline gap-1.5">
             <span className="max-w-24 shrink-0 truncate font-normal tabular-nums text-muted-foreground @max-[14rem]/thread-pr-summary:font-medium">{numberLabel(item, mixedRepos)}</span>
-            <span className="min-w-0 truncate font-medium group-hover/pr-link:underline @max-[14rem]/thread-pr-summary:sr-only">{title}</span>
+            {/* minmax(0, max-content) gives the title a min-content width of 0, so it
+                truncates without raising the link's minimum width. */}
+            <span className="grid min-w-0 grid-cols-[minmax(0,max-content)] @max-[14rem]/thread-pr-summary:sr-only">
+              <span className="truncate font-medium group-hover/pr-link:underline">{title}</span>
+            </span>
           </span>
         </a>
         {compact ? <AutoFixOnDot item={item} /> : null}
@@ -619,12 +660,18 @@ export default definePluginApp((app) => {
       const style = document.createElement("style");
       // BB's Git summary grows to fill its share of the row. Keep that hit area
       // and align its contents, including the disclosure chevron, at the end.
+      // When our single-PR summary shares the row, Git sizes to its own content
+      // instead, so it stops splitting the row evenly with the PR, and the PR takes
+      // the rest. Git still shrinks and clips when the row is tight.
       style.textContent = `
         #thread-prompt-banner-git-toggle {
           justify-content: flex-end;
         }
         #thread-prompt-banner-git-toggle > :last-child {
           margin-left: 0;
+        }
+        section:has([data-thread-prs-summary]) #thread-prompt-banner-git-toggle {
+          flex: 0 1 auto;
         }
       `;
       document.head.append(style);
