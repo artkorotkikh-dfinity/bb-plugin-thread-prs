@@ -79,6 +79,40 @@ GitHub credentials stay in `gh`. Subscription history stays in BB plugin
 storage. The owner's model provider receives the PR URL, branch, applicable
 check links, and review excerpts with their authors and locations.
 
+## Copilot follow-ups
+
+Copilot code review posts its verdict and findings in the review body, often
+with no inline comments. The PR row shows a **Copilot** chip when Copilot's
+latest review is on the PR's current head and one of these is true:
+
+- The verdict is **Needs a closer look**.
+- It lists open issues that aren't marked **New**. These were raised in an
+  earlier review and are still open.
+- It lists **previously missed issues**, with a file and line but no inline
+  conversation.
+
+New issues have their own inline conversations, so they don't show the chip.
+Auto-fix handles them like any other review comment. A newer commit hides
+the chip until Copilot reviews again.
+
+Click the chip to see the verdict, Copilot's summary and each finding. On a
+narrow bar, the chip shows only a count.
+
+- **Send to agent** starts one turn in the owner thread, the same thread
+  Auto-fix uses. The request quotes the verdict, the summary and each finding
+  with its link or location. It asks the agent to check each finding against
+  the code, fix only the valid ones and push. The agent doesn't reply on
+  GitHub, resolve threads or request another review. Send works only while the
+  owner is idle, so it never interrupts a running turn.
+- **Dismiss** hides the findings until Copilot posts a new review.
+
+Both buttons apply to that review only, and the choice is kept across reloads.
+With Auto-fix on, the plugin also sends one BB push notification per
+qualifying review through the built-in Push Notifications plugin. A click on
+the notification opens the owner thread. Copilot's findings are never sent to
+the agent without a click, even with Auto-fix on, and sending them doesn't use
+Auto-fix's three requests.
+
 ## Settings
 
 Open **Plugins → Thread PR Manager → Settings**. All five menu switches

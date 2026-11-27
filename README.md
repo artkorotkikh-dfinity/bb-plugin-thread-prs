@@ -30,6 +30,10 @@ Open the PR list above the composer. Use the three-dot menu to view a diff,
 retry eligible CI jobs, request Copilot review, mark a PR as draft, or confirm a
 merge. Choose which actions appear in the plugin settings.
 
+When Copilot's latest review says **Needs a closer look**, or lists issues that
+are still open or were missed earlier, a **Copilot** chip appears on the PR row.
+Open it to send the findings to the thread's agent or dismiss them.
+
 ## Auto-fix
 
 Auto-fix is off by default. Enable it per PR to let the owning agent follow up

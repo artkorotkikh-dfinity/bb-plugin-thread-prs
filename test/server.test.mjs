@@ -9,7 +9,7 @@ import plugin from "../dist/server.js";
 
 test("the plugin imports only public SDK and declared host shims", () => {
   const result = experimental_scanPublicSdkOnly(fileURLToPath(new URL("..", import.meta.url)), {
-    allow: [/^(react|clsx|tailwind-merge|sonner|jsdom|@testing-library\/react|@radix-ui\/react-tooltip|@radix-ui\/react-alert-dialog|@radix-ui\/react-dropdown-menu)$/],
+    allow: [/^(react|clsx|tailwind-merge|sonner|jsdom|@testing-library\/react|@radix-ui\/react-tooltip|@radix-ui\/react-alert-dialog|@radix-ui\/react-dropdown-menu|@radix-ui\/react-popover)$/],
   });
   assert.deepEqual(result.violations, []);
   assert.deepEqual(result.privateDependencies, []);
@@ -91,6 +91,7 @@ function setup({ threads = THREADS, links = LINKS, descendantIds = ["C", "G"], r
         callRpc: async ({ pluginId, method, input }) => {
           rpcCalls.push({ pluginId, method, input });
           if (method === "refresh") return onRefresh ? onRefresh() : { ok: true };
+          if (pluginId === "push-notifications") return { ok: true, channels: ["desktop"] };
           return Object.fromEntries(input.keys.map((key) => [key, rows[key] ?? { outcome: "absent" }]));
         },
       },
@@ -1313,4 +1314,134 @@ test("a watcher read during candidate activation retries without caching a start
   assert.equal(item.error, null);
   assert.equal(item.status.state, "open");
   assert.equal(hostCalls.length, 2);
+});
+
+const stillOpenIssue = { kind: "still_open", severity: "Medium", title: "Bound pagination pages", url: "https://github.com/o/r/pull/10#discussion_r11", location: null, detail: null };
+const missedIssue = { kind: "missed", severity: "Low", title: "Dispose of loaders", url: null, location: "src/Detail.svelte:346", detail: "Clearing the loader leaves pagination running." };
+const newIssue = { kind: "new", severity: "High", title: "Reject repeated pages", url: "https://github.com/o/r/pull/10#discussion_r12", location: null, detail: null };
+const copilotStatus = (review = {}, change = {}) => ({
+  ...status(10, "open"),
+  copilotReview: {
+    id: "cr-1", url: "https://github.com/o/r/pull/10#pullrequestreview-1", submittedAt: "2026-11-27T12:00:00Z", commitOid: "head-1",
+    verdict: "closer_look", verdictLabel: "Needs a closer look", summary: "Human assessment is needed because the cache may serve a stale list.",
+    issues: [stillOpenIssue, missedIssue, newIssue], resolvedCount: 1, ...review,
+  },
+  ...change,
+});
+
+function copilotSetup(t, options = {}) {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  let pr = copilotStatus();
+  const env = setup({ ...options, readPr: (u) => u === url(10) && pr === null ? { ok: false, message: "gh failed" }
+    : { ok: true, pr: u === url(10) ? pr : status(Number(u.split("/").pop()), "open") } });
+  t.after(() => env.harness.lifecycle.dispose());
+  return { ...env, setPr(value) { pr = value; }, advance(ms = 120_000) { now += ms; } };
+}
+const followUpOf = async (harness, n = 10) => (await list(harness)).items.find((item) => item.number === n).copilotFollowUp;
+const pushes = (rpcCalls) => rpcCalls.filter((call) => call.pluginId === "push-notifications");
+
+test("a Copilot follow-up waits for the user's Send, goes to the owner once, and stays hidden for that review", async (t) => {
+  const env = copilotSetup(t);
+  await plugin(env.bb);
+  const followUp = await followUpOf(env.harness);
+  assert.deepEqual(followUp, {
+    reviewId: "cr-1", reviewUrl: "https://github.com/o/r/pull/10#pullrequestreview-1",
+    verdict: "closer_look", verdictLabel: "Needs a closer look",
+    summary: "Human assessment is needed because the cache may serve a stale list.",
+    issues: [stillOpenIssue, missedIssue], ownerThreadId: "R", ownerThreadTitle: "Root", ownerBusy: false,
+  });
+  const item = (await list(env.harness)).items.find((entry) => entry.number === 10);
+  assert.equal(Object.hasOwn(item.status, "copilotReview"), false);
+  assert.equal((await followUpOf(env.harness, 13)), null);
+  assert.equal(env.sends.length, 0, "nothing is sent without a click");
+
+  const sent = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(10), reviewId: "cr-1", action: "send" });
+  assert.deepEqual(sent, { ok: true, message: "Sent to “Root”." });
+  assert.equal(env.sends.length, 1);
+  assert.equal(env.sends[0].threadId, "R");
+  assert.equal(env.sends[0].mode, "start");
+  const text = env.sends[0].input[0].text;
+  for (const part of ["Copilot follow-up", url(10), '"fix/pr-10"', "Needs a closer look", "pullrequestreview-1",
+    "cache may serve a stale list", "Bound pagination pages", "discussion_r11", "Dispose of loaders", "src/Detail.svelte:346",
+    "Clearing the loader", "Verify each one against the current code", "Don't reply on GitHub", "Don't merge, close or force-push."]) {
+    assert.ok(text.includes(part), part);
+  }
+  assert.doesNotMatch(text, /Reject repeated pages/, "new issues reach the agent through Auto-fix");
+  assert.equal(await followUpOf(env.harness), null);
+  const again = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(10), reviewId: "cr-1", action: "send" });
+  assert.equal(again.ok, false);
+  assert.equal(env.sends.length, 1);
+
+  env.setPr(copilotStatus({ id: "cr-2", verdict: "changes", verdictLabel: "Changes recommended", issues: [stillOpenIssue] }));
+  env.advance();
+  assert.equal((await followUpOf(env.harness)).reviewId, "cr-2", "a newer review shows again");
+  const dismissed = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(10), reviewId: "cr-2", action: "dismiss" });
+  assert.equal(dismissed.ok, true);
+  assert.equal(await followUpOf(env.harness), null);
+  assert.equal(env.sends.length, 1);
+
+  const reloaded = await env.harness.lifecycle.reload(plugin);
+  t.after(() => reloaded.harness.lifecycle.dispose());
+  assert.equal(await followUpOf(reloaded.harness), null, "dismissal survives reload");
+});
+
+test("Send waits for an idle owner and refuses a review that changed", async (t) => {
+  const env = copilotSetup(t, { threads: { ...THREADS, R: { ...THREADS.R, queuedMessageCount: 1 } } });
+  await plugin(env.bb);
+  assert.equal((await followUpOf(env.harness)).ownerBusy, true);
+  const busy = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(10), reviewId: "cr-1", action: "send" });
+  assert.deepEqual(busy, { ok: false, message: "The agent is busy. Send when its turn ends." });
+  const stale = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(10), reviewId: "cr-0", action: "send" });
+  assert.equal(stale.ok, false);
+  const unlisted = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(500), reviewId: "cr-1", action: "dismiss" });
+  assert.equal(unlisted.ok, false);
+  assert.equal(env.sends.length, 0);
+  assert.notEqual(await followUpOf(env.harness), null);
+});
+
+test("no follow-up after a newer push or when Copilot has nothing left", async (t) => {
+  const env = copilotSetup(t);
+  env.setPr(copilotStatus({}, { headRefOid: "head-2" }));
+  await plugin(env.bb);
+  assert.equal(await followUpOf(env.harness), null, "review is on an older commit");
+  env.setPr(copilotStatus({ verdict: "changes", verdictLabel: "Changes recommended", issues: [newIssue] }));
+  env.advance();
+  assert.equal(await followUpOf(env.harness), null, "only new issues");
+  env.setPr(copilotStatus({ verdict: "approval", verdictLabel: "Approval recommended", issues: [] }));
+  env.advance();
+  assert.equal(await followUpOf(env.harness), null);
+  env.setPr(copilotStatus());
+  env.advance();
+  assert.notEqual(await followUpOf(env.harness), null);
+  env.setPr(null);
+  env.advance();
+  assert.equal(await followUpOf(env.harness), null, "a failed read hides it until GitHub answers again");
+  const refused = await env.harness.behavior.callRpc("copilotFollowUp", { threadId: "R", url: url(10), reviewId: "cr-1", action: "send" });
+  assert.equal(refused.ok, false);
+  assert.equal(env.sends.length, 0);
+});
+
+test("Auto-fix PRs push one notification per Copilot review and never send the findings themselves", async (t) => {
+  const env = autoFixSetup(t);
+  env.setPr(copilotStatus());
+  await plugin(env.bb);
+  await enable(env.harness);
+  await tick(t, env.harness);
+  assert.deepEqual(pushes(env.rpcCalls).map((call) => call.input), [{
+    title: "Copilot needs a closer look · #10",
+    body: "Human assessment is needed because the cache may serve a stale list.",
+    threadId: "R",
+  }]);
+  assert.equal(env.sends.length, 0);
+  env.advance();
+  await tick(t, env.harness);
+  assert.equal(pushes(env.rpcCalls).length, 1, "one push per review");
+  env.setPr(copilotStatus({ id: "cr-2", verdict: "changes", verdictLabel: "Changes recommended", summary: "", issues: [stillOpenIssue, missedIssue] }));
+  env.advance();
+  await tick(t, env.harness);
+  assert.equal(pushes(env.rpcCalls).length, 2);
+  assert.equal(pushes(env.rpcCalls)[1].input.title, "Copilot: 2 open issues · #10");
+  assert.equal(pushes(env.rpcCalls)[1].input.body, "Bound pagination pages");
+  assert.equal(env.sends.length, 0);
 });

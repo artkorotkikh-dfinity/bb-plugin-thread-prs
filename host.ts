@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { z } from "zod";
 import { commitOidSchema, hostContract, parsePrUrl, reviewThreadSchema, type GhRead, type MergeMethod, type MergePreview, type PrStatus } from "./contract.js";
+import { COPILOT_REVIEWER, parseCopilotReviewBody } from "./lib/copilot-review.js";
 
 const GH_TIMEOUT_MS = 20_000;
 
@@ -39,6 +40,7 @@ const FIELDS = `number title url state isDraft updatedAt reviewDecision headRefO
     lastComment: comments(last: 1) { nodes { id author { login } body url } }
   } }
   reviews(last: 1, states: [CHANGES_REQUESTED]) { nodes { id author { login } comments { totalCount } } }
+  copilotReview: reviews(last: 1, author: ${JSON.stringify(COPILOT_REVIEWER)}) { nodes { id url submittedAt body commit { oid } } }
   reviewRequests(first: 1) { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
     pageInfo { hasNextPage }
@@ -217,6 +219,23 @@ function toStatus(node: Json): PrStatus | null {
       });
       return parsed.success ? [parsed.data] : [];
     }),
+    copilotReview: copilotReviewOf(node.copilotReview),
+  };
+}
+
+/** undefined: the connection was not read; null: Copilot never reviewed this PR. */
+function copilotReviewOf(raw: unknown): PrStatus["copilotReview"] {
+  const connection = obj(raw);
+  if (connection === null || !Array.isArray(connection.nodes)) return undefined;
+  const review = obj(connection.nodes.at(-1));
+  if (review === null || typeof review.id !== "string" || typeof review.body !== "string") return null;
+  const commitOid = obj(review.commit)?.oid;
+  return {
+    id: review.id,
+    url: typeof review.url === "string" ? review.url : "",
+    submittedAt: typeof review.submittedAt === "string" ? review.submittedAt : null,
+    commitOid: typeof commitOid === "string" ? commitOid : null,
+    ...parseCopilotReviewBody(review.body),
   };
 }
 

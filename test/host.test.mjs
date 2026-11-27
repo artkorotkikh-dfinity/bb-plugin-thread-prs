@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
 import entry from "../dist/host.js";
+import { copilotBody } from "./copilot-fixtures.mjs";
 
 const url = (n) => `https://github.com/o/r/pull/${n}`;
 const check = (change = {}) => ({ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-17T10:00:00Z", detailsUrl: "https://ci.example/build", ...change });
@@ -234,4 +235,25 @@ test("mark draft returns the first line of gh failures", async (t) => {
   assert.deepEqual(await fixture.harness.experimental_call("markDraft", { url: url(1) }), {
     ok: false, message: "Permission denied",
   });
+});
+
+test("reads Copilot's latest review with its commit and parses the findings", async (t) => {
+  const reviewed = pr(1), never = pr(2), unread = pr(3);
+  reviewed.copilotReview = { nodes: [{
+    id: "cr-1", url: `${url(1)}#pullrequestreview-1`, submittedAt: "2026-11-27T12:00:00Z", commit: { oid: "head-1" },
+    body: copilotBody({ verdict: "closer_look", summary: "Human assessment is needed.",
+      missed: [{ severity: "Medium", title: "Verify identity", location: "src/a.ts:4", detail: "It can report another size." }] }),
+  }] };
+  never.copilotReview = { nodes: [] };
+  const fixture = await setup(t, { data: { p0: reviewed, p1: never, p2: unread } });
+  const { results } = await fixture.call([url(1), url(2), url(3)]);
+  assert.deepEqual(results[url(1)].pr.copilotReview, {
+    id: "cr-1", url: `${url(1)}#pullrequestreview-1`, submittedAt: "2026-11-27T12:00:00Z", commitOid: "head-1",
+    verdict: "closer_look", verdictLabel: "Needs a closer look", summary: "Human assessment is needed.", resolvedCount: 0,
+    issues: [{ kind: "missed", severity: "Medium", title: "Verify identity", url: null, location: "src/a.ts:4", detail: "It can report another size." }],
+  });
+  assert.equal(results[url(2)].pr.copilotReview, null, "Copilot never reviewed");
+  assert.equal(results[url(3)].pr.copilotReview, undefined, "not read");
+  assert.match((await fixture.args()).at(-1),
+    /copilotReview: reviews\(last: 1, author: "copilot-pull-request-reviewer\[bot\]"\) \{ nodes \{ id url submittedAt body commit \{ oid \} \} \}/);
 });
