@@ -82,64 +82,73 @@ function listNotes(data: ThreadPrs, hiddenCount: number): string[] {
 }
 
 /**
- * The list adds something only when it holds a PR other than the one bb's own segment
- * shows, or Copilot findings that bb's segment can't show. While bb's badge lacks the
- * branch PR (`badgeHasOwn` false), that PR counts as one bb doesn't show.
+ * The list adds something only when it holds a PR that bb's badge doesn't show, or
+ * Copilot findings that bb's badge can't show. `badgeKeys` are the PRs bb's badge is
+ * taken to show (see useBadgeKeys); without them, the thread's branch PR.
  */
-function hasExtras(data: ThreadPrs | undefined, badgeHasOwn = true): data is ThreadPrs {
-  return data !== undefined
-    && data.items.some((item) => item.key !== data.ownBranchKey || !badgeHasOwn || item.copilotFollowUp);
+function hasExtras(
+  data: ThreadPrs | undefined,
+  badgeKeys: readonly string[] = data?.ownBranchKey ? [data.ownBranchKey] : [],
+): data is ThreadPrs {
+  return data !== undefined && data.items.some((item) => !badgeKeys.includes(item.key) || item.copilotFollowUp);
 }
 
-// bb's page re-reads its PR badge when bb's server signals a change, and a page hidden
-// at that moment misses the signal, so a PR opened at the end of a turn can stay off the
-// badge until a reload. One re-read per (environment, PR) for the page's lifetime,
-// shared by every mounted hook.
+// bb's page re-reads its PR badge when bb's server signals a change, and a page that
+// misses the signal keeps a stale badge until a reload: without a PR opened at the end
+// of a turn, or with the PR of a branch the checkout has left. One re-read per
+// disagreement (environment, our branch PR, bb's PR) for the page's lifetime, shared by
+// every mounted hook.
 const badgeRereads = new Map<string, Promise<void>>();
 const settledBadgeRereads = new Set<string>();
 
 /**
- * Whether bb's badge has the thread's branch PR, so our segment can leave that PR out.
- * When bb's row lacks it, ask bb's store to re-read the row once; the badge reads the
- * same store. If the row still lacks the PR after that read, return false so our segment
- * shows it, until the row gets it.
+ * The PRs bb's badge is taken to show, so our segment leaves them out and a PR is never
+ * shown in both places. bb's badge reads bb's row from a store the page shares, so we
+ * read the same row. When it disagrees with our branch PR, either way, ask bb's store to
+ * re-read it once, and leave out both PRs until that read settles. After it, follow the
+ * row: bb shows what the row says, and our segment shows the rest.
  */
-function useBadgeHasBranchPr(environmentId: string | null, ownBranchKey: string | null): boolean {
-  const watched = ownBranchKey === null ? null : environmentId;
-  const pair = watched === null ? null : `${watched} ${ownBranchKey}`;
-  const { data, refetchKeys } = experimental_useRpcKeyedQuery({
+function useBadgeKeys(environmentId: string | null, data: ThreadPrs | undefined): string[] {
+  const own = data?.ownBranchKey ?? null;
+  // No PRs in our data: nothing to leave out, so don't read bb's row.
+  const watched = data !== undefined && data.items.length > 0 ? environmentId : null;
+  const { data: rows, refetchKeys } = experimental_useRpcKeyedQuery({
     pluginId: PR_STATUS_PLUGIN,
     contract: prStatusContract,
     method: "pullRequests",
     keys: watched === null ? [] : [watched],
     enabled: watched !== null,
   });
-  const row = watched === null ? undefined : data?.[watched];
-  // An unloaded row is no answer yet: change nothing until bb's store has one.
-  const missing = row !== undefined && prStatusRowKey(row) !== ownBranchKey;
+  const row = watched === null ? undefined : rows?.[watched];
+  // undefined: no answer from bb's store yet; null: bb's badge shows no PR.
+  const shown = row === undefined ? undefined : prStatusRowKey(row);
+  const disagreement = shown === undefined || shown === own ? null : `${watched} ${own ?? "-"} ${shown ?? "-"}`;
   const [settled, setSettled] = useState<string | null>(null);
   useEffect(() => {
-    if (!missing || watched === null || pair === null) return;
-    let reread = badgeRereads.get(pair);
+    if (disagreement === null || watched === null) return;
+    let reread = badgeRereads.get(disagreement);
     if (reread === undefined) {
       reread = refetchKeys([watched])
         .catch(() => {})
-        .then(() => { settledBadgeRereads.add(pair); });
-      badgeRereads.set(pair, reread);
+        .then(() => { settledBadgeRereads.add(disagreement); });
+      badgeRereads.set(disagreement, reread);
     }
     let live = true;
-    void reread.then(() => { if (live) setSettled(pair); });
+    void reread.then(() => { if (live) setSettled(disagreement); });
     return () => { live = false; };
-  }, [missing, watched, pair, refetchKeys]);
-  return !(missing && pair !== null && (settled === pair || settledBadgeRereads.has(pair)));
+  }, [disagreement, watched, refetchKeys]);
+  if (shown === undefined) return own === null ? [] : [own];
+  if (disagreement !== null && settled !== disagreement && !settledBadgeRereads.has(disagreement)) {
+    return [own, shown].filter((key): key is string => key !== null);
+  }
+  return shown === null ? [] : [shown];
 }
 
-/** The context row's PRs, and whether bb's badge already shows the branch PR. */
+/** The context row's PRs, and the PRs bb's badge already shows. */
 function useSegmentPrs({ threadId, environment }: ExperimentalThreadContextSegmentInput) {
   const prs = useThreadPrs(threadId);
-  const own = prs.data?.items.find((item) => item.key === prs.data?.ownBranchKey);
-  const badgeHasOwn = useBadgeHasBranchPr(environment?.id ?? null, own?.key ?? null);
-  return { ...prs, badgeHasOwn };
+  const badgeKeys = useBadgeKeys(environment?.id ?? null, prs.data);
+  return { ...prs, badgeKeys };
 }
 
 type DesktopBridge = { openExternalUrl?: (url: string) => void };
@@ -609,11 +618,11 @@ function OwnBranchCopilot({ threadId, item }: { threadId: string; item: ThreadPr
 
 function SegmentSummary(props: ExperimentalThreadContextSegmentProps) {
   const { threadId, isExpanded, onToggle } = props;
-  const { data, hiddenCount, mixedRepos, activeOnly, badgeHasOwn } = useSegmentPrs(props);
-  if (!hasExtras(data, badgeHasOwn)) return null;
+  const { data, hiddenCount, mixedRepos, activeOnly, badgeKeys } = useSegmentPrs(props);
+  if (!hasExtras(data, badgeKeys)) return null;
   if (data.items.length === 1) {
     const only = data.items[0]!;
-    return only.key === data.ownBranchKey && badgeHasOwn
+    return badgeKeys.includes(only.key)
       ? <OwnBranchCopilot threadId={threadId} item={only} />
       : <InlinePr threadId={threadId} item={only} mixedRepos={mixedRepos} />;
   }
@@ -664,8 +673,8 @@ function SegmentSummary(props: ExperimentalThreadContextSegmentProps) {
 
 function SegmentDetails(props: ExperimentalThreadContextSegmentProps) {
   const { threadId, isExpanded } = props;
-  const { data, hiddenCount, mixedRepos, badgeHasOwn } = useSegmentPrs(props);
-  if (!isExpanded || !hasExtras(data, badgeHasOwn) || data.items.length === 1) return null;
+  const { data, hiddenCount, mixedRepos, badgeKeys } = useSegmentPrs(props);
+  if (!isExpanded || !hasExtras(data, badgeKeys) || data.items.length === 1) return null;
   return (
     <div className="px-1.5 pb-1.5">
       <PrList threadId={threadId} data={data} hiddenCount={hiddenCount} mixedRepos={mixedRepos} />
@@ -675,8 +684,8 @@ function SegmentDetails(props: ExperimentalThreadContextSegmentProps) {
 
 function useSegmentVisible(input: ExperimentalThreadContextSegmentInput): boolean {
   const kind = experimental_useThreadContextKind();
-  const { data, badgeHasOwn } = useSegmentPrs(input);
-  return kind === "banner" && hasExtras(data, badgeHasOwn);
+  const { data, badgeKeys } = useSegmentPrs(input);
+  return kind === "banner" && hasExtras(data, badgeKeys);
 }
 
 function CardSection({ threadId }: ExperimentalThreadContextCardProps) {

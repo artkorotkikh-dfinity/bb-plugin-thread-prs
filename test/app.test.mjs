@@ -232,17 +232,25 @@ const withEnvironment = id => ({ ...props, environment: { id } });
 const bbReads = slot => slot.inspection.rpcCalls.filter(call => call.method === "pullRequests").length;
 function badgeOptions(rows, getData = () => ({ ...data([item(12)]), ownBranchKey: "o/r#12" })) {
   const config = options(getData);
-  config.rpc.pullRequests = ({ keys }) => Object.fromEntries(keys.map(key => [key, rows()]));
+  config.rpc.pullRequests = async ({ keys }) => Object.fromEntries(await Promise.all(keys.map(async key => [key, await rows()])));
   return config;
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
-test("a thread without a branch PR never reads bb's badge row", async t => {
-  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_none"), badgeOptions(() => bbRow(null), () => data([item(12)])));
+test("a thread with no PRs never reads bb's badge row", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_none"), badgeOptions(() => bbRow(null), () => data([])));
+  t.after(() => slot.lifecycle.unmount());
+  await waitFor(() => assert.ok(slot.inspection.rpcCalls.some(call => call.method === "threadPullRequests")));
+  await settle();
+  assert.equal(bbReads(slot), 0);
+});
+
+test("a linked PR while bb's badge shows none: one read of bb's row, and the PR stays in our segment", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_linked"), badgeOptions(() => bbRow(null), () => data([item(12)])));
   t.after(() => slot.lifecycle.unmount());
   await slot.findByRole("button", { name: "Actions for pull request #12" });
   await settle();
-  assert.equal(bbReads(slot), 0);
+  assert.equal(bbReads(slot), 1);
 });
 
 test("a branch PR that bb's badge already has: one read of bb's row and nothing from us", async t => {
@@ -286,4 +294,29 @@ test("bb's row is re-read once per environment and PR, even across remounts", as
   await second.findByRole("button", { name: "Actions for pull request #12" });
   await settle();
   assert.equal(bbReads(second), 1);
+});
+
+test("a stale bb badge with a PR that is no longer the branch PR: ours waits for the re-read, then shows it", async t => {
+  // Our data counts #12 only as a linked PR; bb's page still has #12 as the branch PR.
+  let release;
+  const reread = new Promise(resolve => { release = resolve; });
+  let reads = 0;
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_left"),
+    badgeOptions(() => (reads++ === 0 ? bbRow(12) : reread), () => data([item(12)])));
+  t.after(() => slot.lifecycle.unmount());
+  await waitFor(() => assert.equal(bbReads(slot), 2));
+  await settle();
+  // bb's badge still shows #12 while the re-read is out: never both.
+  assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
+  release(bbRow(null));
+  await slot.findByRole("button", { name: "Actions for pull request #12" });
+});
+
+test("bb's row confirms a PR our data doesn't count as the branch PR: our segment leaves it to bb", async t => {
+  const slot = renderSlot({ component: segment.summary }, withEnvironment("env_confirmed"), badgeOptions(() => bbRow(12), () => data([item(12)])));
+  t.after(() => slot.lifecycle.unmount());
+  await waitFor(() => assert.equal(bbReads(slot), 2));
+  await settle();
+  assert.equal(bbReads(slot), 2);
+  assert.equal(slot.queryByRole("button", { name: "Actions for pull request #12" }), null);
 });
